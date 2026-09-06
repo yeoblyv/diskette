@@ -349,7 +349,15 @@ func doCopyOrMove(app *Graphite.Application, src, dst *filepane.FilePane, move b
 	mod := Graphite.NewWindow(50, 9, title)
 	mod.AddWidget(progressLbl)
 	mod.AddWidget(bar)
-	mod.AddWidget(Graphite.NewButton(2, 6, "Cancel", Graphite.BtnDefault, func() {
+	// Y=-2 (2 rows above the bottom of the content area), not a fixed
+	// row number: Window's default PaddingY shrinks the content area a
+	// child's Y is resolved against, so a small fixed window height like
+	// this one's can silently place a button past the actual content
+	// bounds — BaseWidget.DrawRelative's parent-bounds clamp then caps
+	// its LastH at 0, leaving it focusable and Enter-triggerable but
+	// never clickable (HitTest requires LastH > 0). See graphite's
+	// ShowConfirm for the same fix and fuller reasoning.
+	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
 		cancel()
 	}))
 	app.SetModal(mod)
