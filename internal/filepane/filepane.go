@@ -10,11 +10,22 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
+	"unicode"
 
 	Graphite "github.com/yeoblyv/graphite"
 
 	"github.com/yeoblyv/diskette/internal/vfs"
 )
+
+// doubleClickWindow is how close together two clicks on the same row must
+// land to count as a double-click, matching graphite's own ListBox/Fader
+// convention.
+const doubleClickWindow = 500 * time.Millisecond
+
+// searchTimeout is how long a pause between keystrokes resets the
+// quick-search buffer, so typing a fresh word doesn't append to a stale one.
+const searchTimeout = time.Second
 
 // SortField selects which column FilePane orders its listing by.
 type SortField int
@@ -50,10 +61,19 @@ type FilePane struct {
 	sortField SortField
 	sortDesc  bool
 
+	backStack    []string
+	forwardStack []string
+
+	lastClickIdx  int
+	lastClickTime time.Time
+
+	searchBuf    string
+	lastSearchAt time.Time
+
 	// OnPathChanged, if set, is called after every successful navigation
-	// (SetPath or Enter on a directory row) with the pane's new path —
-	// the host program uses it to keep a window title or status line in
-	// sync.
+	// (SetPath, Back/Forward/Up, or Enter on a directory row) with the
+	// pane's new path — the host program uses it to keep a window title
+	// or status line in sync.
 	OnPathChanged func(path string)
 
 	// OnFunctionKey, if set, is called for every F1-F12 keypress this
@@ -62,6 +82,12 @@ type FilePane struct {
 	// across both panes and reads HasFocus() (or its own bookkeeping) to
 	// tell which pane an action should apply to.
 	OnFunctionKey func(key Graphite.KeyCode)
+
+	// OnSearchChanged, if set, is called every time typeAhead's
+	// quick-search buffer changes, so the host program can surface it
+	// (e.g. in a status line) — FilePane itself only draws the jumped-to
+	// selection, not the query text.
+	OnSearchChanged func(query string)
 }
 
 // New creates a FilePane at (x, y, w, h) — 0/negative w or h stretch to
@@ -110,11 +136,27 @@ func (fp *FilePane) SelectionPaths() []string {
 
 // SetPath lists dir and navigates there, resetting the cursor, scroll
 // position, and any tags. It leaves the pane on its current path if dir
-// cannot be listed (e.g. permission denied).
+// cannot be listed (e.g. permission denied). This is a fresh navigation:
+// it pushes the pane's current path onto the back-navigation stack and
+// clears the forward stack, exactly like following a link in a browser.
 func (fp *FilePane) SetPath(dir string) {
+	fp.navigate(dir, true)
+}
+
+// navigate is the shared implementation behind SetPath, Back, and Forward.
+// addToHistory controls whether the pane's current path is pushed onto the
+// back stack first — Back/Forward manage the stacks themselves and pass
+// false so stepping through history doesn't also grow it. It reports
+// whether dir could actually be listed.
+func (fp *FilePane) navigate(dir string, addToHistory bool) bool {
 	entries, err := fp.FS.List(context.Background(), dir)
 	if err != nil {
-		return
+		return false
+	}
+
+	if addToHistory && fp.path != "" && fp.path != dir {
+		fp.backStack = append(fp.backStack, fp.path)
+		fp.forwardStack = fp.forwardStack[:0]
 	}
 
 	fp.path = dir
@@ -133,7 +175,83 @@ func (fp *FilePane) SetPath(dir string) {
 	if fp.OnPathChanged != nil {
 		fp.OnPathChanged(fp.path)
 	}
+	return true
 }
+
+// Up navigates to the parent directory (equivalent to activating the ".."
+// row), leaving the cursor on the entry that was just left — so stepping
+// in and immediately back out lands exactly where you started, instead of
+// resetting to the top of the parent's listing.
+func (fp *FilePane) Up() {
+	parent, ok := fp.FS.Parent(fp.path)
+	if !ok {
+		return
+	}
+	childName := fp.baseName()
+	if fp.navigate(parent, true) {
+		fp.selectByName(childName)
+	}
+}
+
+// baseName returns the current directory's own name — its last path
+// segment — by stripping its parent's path from fp.path. FileSystem has
+// no dedicated "base name" method; Parent already gives us the exact
+// prefix to strip, and TrimLeft handles both POSIX and Windows separators
+// without needing to know which convention this FS uses.
+func (fp *FilePane) baseName() string {
+	parent, ok := fp.FS.Parent(fp.path)
+	if !ok {
+		return fp.path
+	}
+	return strings.TrimLeft(strings.TrimPrefix(fp.path, parent), `/\`)
+}
+
+// selectByName moves the cursor to the row named name, if present, without
+// changing the current directory or scrolling further than necessary.
+func (fp *FilePane) selectByName(name string) {
+	for i, r := range fp.rows {
+		if r.Name == name {
+			fp.cursor = i
+			fp.clampScroll()
+			return
+		}
+	}
+}
+
+// Back navigates to the previously visited path, if any, pushing the
+// current path onto the forward stack so Forward can return to it.
+func (fp *FilePane) Back() {
+	if len(fp.backStack) == 0 {
+		return
+	}
+	prev := fp.backStack[len(fp.backStack)-1]
+	leaving := fp.path
+	if !fp.navigate(prev, false) {
+		return
+	}
+	fp.backStack = fp.backStack[:len(fp.backStack)-1]
+	fp.forwardStack = append(fp.forwardStack, leaving)
+}
+
+// Forward navigates to the path Back most recently left, if any.
+func (fp *FilePane) Forward() {
+	if len(fp.forwardStack) == 0 {
+		return
+	}
+	next := fp.forwardStack[len(fp.forwardStack)-1]
+	leaving := fp.path
+	if !fp.navigate(next, false) {
+		return
+	}
+	fp.forwardStack = fp.forwardStack[:len(fp.forwardStack)-1]
+	fp.backStack = append(fp.backStack, leaving)
+}
+
+// CanGoBack reports whether Back would navigate anywhere.
+func (fp *FilePane) CanGoBack() bool { return len(fp.backStack) > 0 }
+
+// CanGoForward reports whether Forward would navigate anywhere.
+func (fp *FilePane) CanGoForward() bool { return len(fp.forwardStack) > 0 }
 
 // Reload re-lists the current directory, preserving the cursor position
 // and tags by entry name where those entries still exist. Callers refresh
@@ -184,9 +302,7 @@ func (fp *FilePane) activateCursor() {
 	}
 	r := fp.rows[fp.cursor]
 	if r.isParent {
-		if parent, ok := fp.FS.Parent(fp.path); ok {
-			fp.SetPath(parent)
-		}
+		fp.Up()
 		return
 	}
 	if r.IsDir {
@@ -323,6 +439,10 @@ func (fp *FilePane) HandleEvent(ev Graphite.Event) {
 			fp.activateCursor()
 		case Graphite.KeyInsert:
 			fp.toggleTagAndAdvance()
+		case Graphite.KeyNone:
+			if ev.CharCode != 0 {
+				fp.typeAhead(ev.CharCode)
+			}
 		default:
 			if isFunctionKey(ev.Key) && fp.OnFunctionKey != nil {
 				fp.OnFunctionKey(ev.Key)
@@ -339,6 +459,13 @@ func (fp *FilePane) HandleEvent(ev Graphite.Event) {
 		if idx >= 0 && idx < len(fp.rows) {
 			fp.cursor = idx
 			fp.clampScroll()
+
+			now := time.Now()
+			if fp.lastClickIdx == idx && now.Sub(fp.lastClickTime) < doubleClickWindow {
+				fp.activateCursor()
+			}
+			fp.lastClickIdx = idx
+			fp.lastClickTime = now
 		}
 
 	case Graphite.EventMouseScrollUp:
@@ -351,6 +478,43 @@ func (fp *FilePane) HandleEvent(ev Graphite.Event) {
 			fp.scroll++
 		}
 	}
+}
+
+// typeAhead implements quick-search: typing accumulates a query (reset
+// after searchTimeout of no typing) and jumps the cursor to the first
+// non-".." row whose name starts with it, case-insensitively — the
+// classic commander "just start typing to find a file" gesture.
+func (fp *FilePane) typeAhead(r rune) {
+	now := time.Now()
+	if fp.lastSearchAt.IsZero() || now.Sub(fp.lastSearchAt) > searchTimeout {
+		fp.searchBuf = ""
+	}
+	fp.searchBuf += string(unicode.ToLower(r))
+	fp.lastSearchAt = now
+
+	for i, row := range fp.rows {
+		if row.isParent {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(row.Name), fp.searchBuf) {
+			fp.cursor = i
+			fp.clampScroll()
+			break
+		}
+	}
+
+	if fp.OnSearchChanged != nil {
+		fp.OnSearchChanged(fp.searchBuf)
+	}
+}
+
+// SearchQuery returns the in-progress quick-search text (see typeAhead),
+// or "" once searchTimeout has passed since the last keystroke.
+func (fp *FilePane) SearchQuery() string {
+	if fp.lastSearchAt.IsZero() || time.Since(fp.lastSearchAt) > searchTimeout {
+		return ""
+	}
+	return fp.searchBuf
 }
 
 // isFunctionKey reports whether key is one of F1-F12.

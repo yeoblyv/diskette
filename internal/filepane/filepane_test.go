@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	Graphite "github.com/yeoblyv/graphite"
 
@@ -265,6 +266,126 @@ func TestFilePane_OnFunctionKeyFiresForFKeysOnly(t *testing.T) {
 
 	if len(got) != 2 || got[0] != Graphite.KeyF5 || got[1] != Graphite.KeyF10 {
 		t.Errorf("OnFunctionKey calls = %v, want [F5 F10]", got)
+	}
+}
+
+func TestFilePane_UpPreservesCursorOnTheDirectoryLeft(t *testing.T) {
+	fp, dir := newTestPane(t)
+
+	subIdx := -1
+	for i, r := range fp.rows {
+		if r.IsDir && !r.isParent {
+			subIdx = i
+		}
+	}
+	if subIdx == -1 {
+		t.Fatal("no directory row found")
+	}
+	fp.cursor = subIdx
+	fp.activateCursor() // enter "sub"
+	if fp.Path() != filepath.Join(dir, "sub") {
+		t.Fatalf("Path() = %q, want the sub directory", fp.Path())
+	}
+
+	fp.cursor = 0
+	fp.activateCursor() // ".." back out
+
+	if fp.Path() != dir {
+		t.Fatalf("Path() after \"..\" = %q, want %q", fp.Path(), dir)
+	}
+	if got, ok := fp.Selected(); !ok || got.Name != "sub" {
+		t.Errorf("cursor after \"..\" is on %+v (ok=%v), want it back on \"sub\"", got, ok)
+	}
+}
+
+func TestFilePane_BackAndForward(t *testing.T) {
+	fp, dir := newTestPane(t)
+	sub := filepath.Join(dir, "sub")
+
+	if fp.CanGoBack() || fp.CanGoForward() {
+		t.Fatal("a freshly created pane should have no history either direction")
+	}
+
+	fp.SetPath(sub)
+	if !fp.CanGoBack() {
+		t.Fatal("CanGoBack() = false after navigating, want true")
+	}
+	if fp.CanGoForward() {
+		t.Fatal("CanGoForward() = true right after a fresh navigation, want false")
+	}
+
+	fp.Back()
+	if fp.Path() != dir {
+		t.Fatalf("Path() after Back() = %q, want %q", fp.Path(), dir)
+	}
+	if !fp.CanGoForward() {
+		t.Fatal("CanGoForward() = false after Back(), want true")
+	}
+
+	fp.Forward()
+	if fp.Path() != sub {
+		t.Fatalf("Path() after Forward() = %q, want %q", fp.Path(), sub)
+	}
+}
+
+func TestFilePane_BackAtStartOfHistoryIsNoop(t *testing.T) {
+	fp, dir := newTestPane(t)
+	fp.Back()
+	if fp.Path() != dir {
+		t.Errorf("Back() with no history changed Path() to %q, want unchanged %q", fp.Path(), dir)
+	}
+}
+
+func TestFilePane_DoubleClickOnDirectoryNavigatesIn(t *testing.T) {
+	fp, dir := newTestPane(t)
+
+	subIdx := -1
+	for i, r := range fp.rows {
+		if r.IsDir && !r.isParent {
+			subIdx = i
+		}
+	}
+	if subIdx == -1 {
+		t.Fatal("no directory row found")
+	}
+	rowY := fp.AbsY + 1 + (subIdx - fp.scroll)
+
+	click := Graphite.Event{Type: Graphite.EventMouseDown, MouseX: fp.AbsX + 2, MouseY: rowY}
+	fp.HandleEvent(click) // first click: just moves the cursor
+	if fp.Path() != dir {
+		t.Fatalf("a single click navigated to %q, want it to stay on %q", fp.Path(), dir)
+	}
+
+	fp.HandleEvent(click) // second click within the double-click window
+	if fp.Path() != filepath.Join(dir, "sub") {
+		t.Fatalf("Path() after double-click = %q, want the sub directory", fp.Path())
+	}
+}
+
+func TestFilePane_TypeAheadJumpsToMatchingName(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.cursor = 0
+
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventKey, CharCode: 'b'})
+
+	got, ok := fp.Selected()
+	if !ok || got.Name != "b.txt" {
+		t.Errorf("after typing \"b\", selection = %+v (ok=%v), want b.txt", got, ok)
+	}
+	if fp.SearchQuery() != "b" {
+		t.Errorf("SearchQuery() = %q, want %q", fp.SearchQuery(), "b")
+	}
+}
+
+func TestFilePane_TypeAheadResetsAfterTimeout(t *testing.T) {
+	fp, _ := newTestPane(t)
+
+	fp.typeAhead('b')
+	fp.lastSearchAt = time.Now().Add(-2 * searchTimeout)
+	fp.typeAhead('a')
+
+	if fp.searchBuf != "a" {
+		t.Errorf("searchBuf = %q after a timed-out keystroke, want it reset to just %q", fp.searchBuf, "a")
 	}
 }
 
