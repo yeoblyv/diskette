@@ -89,6 +89,12 @@ type FilePane struct {
 	// (e.g. in a status line) — FilePane itself only draws the jumped-to
 	// selection, not the query text.
 	OnSearchChanged func(query string)
+
+	// OnOpenFile, if set, is called with a row's full path when Enter or a
+	// double-click activates a regular file (not a directory or the ".."
+	// row) — the host program's hook for launching it in the OS's
+	// associated default application, distinct from F3/F4's $PAGER/$EDITOR.
+	OnOpenFile func(path string)
 }
 
 // New creates a FilePane at (x, y, w, h) — 0/negative w or h stretch to
@@ -306,8 +312,8 @@ func (fp *FilePane) Reload() {
 }
 
 // activateCursor navigates into the directory (or ".." parent) under the
-// cursor. It does nothing for a file row — opening/viewing/editing a file
-// is the host program's concern (F3/F4), not FilePane's.
+// cursor. For a file row it calls OnOpenFile with the file's full path, if
+// set — opening it is the host program's concern, not FilePane's.
 func (fp *FilePane) activateCursor() {
 	if fp.cursor < 0 || fp.cursor >= len(fp.rows) {
 		return
@@ -319,6 +325,10 @@ func (fp *FilePane) activateCursor() {
 	}
 	if r.IsDir {
 		fp.SetPath(fp.FS.Join(fp.path, r.Name))
+		return
+	}
+	if fp.OnOpenFile != nil {
+		fp.OnOpenFile(fp.FS.Join(fp.path, r.Name))
 	}
 }
 

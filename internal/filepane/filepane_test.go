@@ -364,6 +364,65 @@ func TestFilePane_DoubleClickOnDirectoryNavigatesIn(t *testing.T) {
 	}
 }
 
+func TestFilePane_EnterOnFileRowCallsOnOpenFile(t *testing.T) {
+	fp, dir := newTestPane(t)
+
+	fileIdx := -1
+	for i, r := range fp.rows {
+		if !r.isParent && !r.IsDir {
+			fileIdx = i
+			break
+		}
+	}
+	if fileIdx == -1 {
+		t.Fatal("no file row found")
+	}
+	fp.cursor = fileIdx
+	wantName := fp.rows[fileIdx].Name
+
+	var gotPath string
+	calls := 0
+	fp.OnOpenFile = func(path string) { gotPath = path; calls++ }
+
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventKey, Key: Graphite.KeyEnter})
+
+	if calls != 1 {
+		t.Fatalf("OnOpenFile called %d times, want 1", calls)
+	}
+	want := filepath.Join(dir, wantName)
+	if gotPath != want {
+		t.Errorf("OnOpenFile path = %q, want %q", gotPath, want)
+	}
+	if fp.Path() != dir {
+		t.Errorf("Path() = %q, want unchanged %q (a file must not navigate)", fp.Path(), dir)
+	}
+}
+
+func TestFilePane_EnterOnDirectoryRowDoesNotCallOnOpenFile(t *testing.T) {
+	fp, _ := newTestPane(t)
+
+	dirIdx := -1
+	for i, r := range fp.rows {
+		if r.IsDir && !r.isParent {
+			dirIdx = i
+			break
+		}
+	}
+	if dirIdx == -1 {
+		t.Fatal("no directory row found")
+	}
+	fp.cursor = dirIdx
+
+	called := false
+	fp.OnOpenFile = func(string) { called = true }
+
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventKey, Key: Graphite.KeyEnter})
+
+	if called {
+		t.Error("OnOpenFile was called for a directory row, want it only for files")
+	}
+}
+
 func TestFilePane_TypeAheadJumpsToMatchingName(t *testing.T) {
 	fp, _ := newTestPane(t)
 	fp.cursor = 0
