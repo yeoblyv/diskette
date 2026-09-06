@@ -5,12 +5,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 
 	Graphite "github.com/yeoblyv/graphite"
 
+	"github.com/yeoblyv/diskette/internal/assets"
 	"github.com/yeoblyv/diskette/internal/copyengine"
 	"github.com/yeoblyv/diskette/internal/diskspace"
 	"github.com/yeoblyv/diskette/internal/filepane"
@@ -89,11 +91,13 @@ func main() {
 	mainRow.AddChild(newActionGutter(app, left, right), 0)
 	mainRow.AddChild(rightCol, 1)
 
-	diskBar := newDiskSpaceBar(func() diskUsageCache {
+	diskBar := newDiskSpaceBar(func() statusBarState {
+		idx, ap := 0, left
 		if right.HasFocus() {
-			return diskUsage[1]
+			idx, ap = 1, right
 		}
-		return diskUsage[0]
+		count, size, hasTagged := ap.TaggedSummary()
+		return statusBarState{usage: diskUsage[idx], taggedCount: count, taggedSize: size, hasTagged: hasTagged}
 	})
 
 	win.AddWidget(mainRow)
@@ -245,18 +249,30 @@ type diskUsageCache struct {
 	ok    bool
 }
 
-// diskSpaceBar is a full-width row showing a used/total progress bar for
-// whichever pane currently has focus. current is read fresh every frame
-// (see dirButton for why: there is no "focus changed" hook to update from
-// instead), but the underlying diskspace.Query result it reports is
-// cached by the caller.
-type diskSpaceBar struct {
-	Graphite.BaseWidget
-	current func() diskUsageCache
+// statusBarState is one frame's worth of everything the bottom status row
+// needs: the tagged-selection summary for whichever pane is focused, and
+// that pane's cached disk usage.
+type statusBarState struct {
+	usage       diskUsageCache
+	taggedCount int
+	taggedSize  int64
+	hasTagged   bool
 }
 
-func newDiskSpaceBar(current func() diskUsageCache) *diskSpaceBar {
-	return &diskSpaceBar{BaseWidget: Graphite.NewBaseWidget(0, -2, 0, 1), current: current}
+// diskSpaceBar is the full-width row above the F-key bar, split into three
+// parts separated by "│": tagged-selection size, a disk usage progress
+// bar, and a third segment reserved for remote-connection status once a
+// server pane exists (Phase 2) — shown as "Local" for now rather than
+// left blank, since local-only is the accurate current state, not an
+// unfinished one. state is read fresh every frame (see dirButton for why:
+// there is no "focus changed" hook to update from instead).
+type diskSpaceBar struct {
+	Graphite.BaseWidget
+	state func() statusBarState
+}
+
+func newDiskSpaceBar(state func() statusBarState) *diskSpaceBar {
+	return &diskSpaceBar{BaseWidget: Graphite.NewBaseWidget(0, -2, 0, 1), state: state}
 }
 
 // formatBytes renders a byte count in the largest binary unit (KiB, MiB,
@@ -283,9 +299,54 @@ func (d *diskSpaceBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) 
 		c.DrawCell(d.AbsX+x, d.AbsY, " ", theme.BgScreen, theme.FgWindow)
 	}
 
-	cache := d.current()
+	const (
+		taggedSegW = 28
+		serverSegW = 20
+	)
+	diskSegW := d.LastW - taggedSegW - serverSegW - 2 // 2 dividers, 1 column each
+	if diskSegW < 20 {
+		// Too narrow for three segments to mean anything — fall back to
+		// just the disk segment, full width, rather than three
+		// unreadably squeezed fragments.
+		d.drawDiskSegment(c, d.AbsX, d.LastW)
+		return
+	}
+
+	state := d.state()
+
+	taggedText := "No files tagged"
+	if state.hasTagged {
+		taggedText = fmt.Sprintf("Tagged: %d item(s), %s", state.taggedCount, formatBytes(uint64(state.taggedSize)))
+	}
+	c.DrawTextBounded(d.AbsX, d.AbsY, taggedSegW, taggedText, theme.BgScreen, theme.FgWindow)
+
+	dividerX1 := d.AbsX + taggedSegW
+	c.DrawCell(dividerX1, d.AbsY, "│", theme.BgScreen, theme.FgDisabled)
+
+	diskX := dividerX1 + 1
+	d.drawDiskSegmentUsage(c, diskX, diskSegW, state.usage)
+
+	dividerX2 := diskX + diskSegW
+	c.DrawCell(dividerX2, d.AbsY, "│", theme.BgScreen, theme.FgDisabled)
+
+	// Reserved for remote-connection status once a server pane exists
+	// (see the project's SFTP phase) — "Local" is accurate today, not a
+	// placeholder pretending to be a real connection indicator.
+	c.DrawTextBounded(dividerX2+1, d.AbsY, serverSegW-1, "Server: Local", theme.BgScreen, theme.FgDisabled)
+}
+
+// drawDiskSegment resolves state itself, for the narrow-terminal fallback
+// path that skips the tagged/server segments entirely.
+func (d *diskSpaceBar) drawDiskSegment(c *Graphite.Canvas, x, w int) {
+	d.drawDiskSegmentUsage(c, x, w, d.state().usage)
+}
+
+// drawDiskSegmentUsage draws the "Disk: free of total (N% used) [bar]"
+// segment at x, within width w.
+func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache diskUsageCache) {
+	theme := c.Theme()
 	if !cache.ok || cache.usage.Total == 0 {
-		c.DrawTextBounded(d.AbsX, d.AbsY, d.LastW, "Disk: n/a", theme.BgScreen, theme.FgDisabled)
+		c.DrawTextBounded(x, d.AbsY, w, "Disk: n/a", theme.BgScreen, theme.FgDisabled)
 		return
 	}
 
@@ -293,16 +354,16 @@ func (d *diskSpaceBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) 
 	usedPct := float64(used) / float64(cache.usage.Total) * 100
 	label := fmt.Sprintf("Disk: %s free of %s (%.0f%% used)", formatBytes(cache.usage.Free), formatBytes(cache.usage.Total), usedPct)
 
-	barW := d.LastW - len([]rune(label)) - 3
+	barW := w - len([]rune(label)) - 3
 	if barW < 10 {
-		c.DrawTextBounded(d.AbsX, d.AbsY, d.LastW, label, theme.BgScreen, theme.FgWindow)
+		c.DrawTextBounded(x, d.AbsY, w, label, theme.BgScreen, theme.FgWindow)
 		return
 	}
 
-	c.DrawTextBounded(d.AbsX, d.AbsY, len([]rune(label)), label, theme.BgScreen, theme.FgWindow)
-	x := d.AbsX + len([]rune(label)) + 1
-	c.DrawCell(x, d.AbsY, "[", theme.BgScreen, theme.FgWindow)
-	x++
+	c.DrawTextBounded(x, d.AbsY, len([]rune(label)), label, theme.BgScreen, theme.FgWindow)
+	barX := x + len([]rune(label)) + 1
+	c.DrawCell(barX, d.AbsY, "[", theme.BgScreen, theme.FgWindow)
+	barX++
 	filled := int(usedPct / 100 * float64(barW))
 	barColor := theme.Primary
 	if usedPct >= 90 {
@@ -312,31 +373,35 @@ func (d *diskSpaceBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) 
 	}
 	for i := 0; i < barW; i++ {
 		if i < filled {
-			c.DrawCell(x+i, d.AbsY, "█", theme.BgScreen, barColor)
+			c.DrawCell(barX+i, d.AbsY, "█", theme.BgScreen, barColor)
 		} else {
-			c.DrawCell(x+i, d.AbsY, "░", theme.BgScreen, theme.Disabled)
+			c.DrawCell(barX+i, d.AbsY, "░", theme.BgScreen, theme.Disabled)
 		}
 	}
-	c.DrawCell(x+barW, d.AbsY, "]", theme.BgScreen, theme.FgWindow)
+	c.DrawCell(barX+barW, d.AbsY, "]", theme.BgScreen, theme.FgWindow)
 }
 
 // newFKeyBar builds the bottom action bar. F1/F3/F4/F9 are listed with no
 // OnClick (fkeybar renders those dimmed and inert) since they aren't
 // implemented yet: F3/F4 need Suspend/Resume (a later phase), and F1/F9
 // weren't required by this phase's scope. Showing them dimmed is honest
-// about that instead of quietly leaving them off the bar's layout.
+// about that instead of quietly leaving them off the bar's layout. Every
+// active key is RolePrimary (the palette's lime accent) except Delete,
+// which is destructive and stays RoleDanger — one accent color for
+// everything, one exception, exactly as specified, not a color per
+// action.
 func newFKeyBar(app *Graphite.Application, active func() *filepane.FilePane, other func(*filepane.FilePane) *filepane.FilePane) *fkeybar.Bar {
 	return fkeybar.New(0, -1, []fkeybar.Key{
 		{Label: "F1", Text: "Help"},
-		{Label: "F2", Text: "Rename", Role: fkeybar.RolePrimary, OnClick: func() { doRename(app, active()) }},
+		{Label: "F2", Text: "Rename", OnClick: func() { doRename(app, active()) }},
 		{Label: "F3", Text: "View"},
 		{Label: "F4", Text: "Edit"},
-		{Label: "F5", Text: "Copy", Role: fkeybar.RolePrimary, OnClick: func() { doCopyOrMove(app, active(), other(active()), false) }},
-		{Label: "F6", Text: "Move", Role: fkeybar.RoleAccent, OnClick: func() { doCopyOrMove(app, active(), other(active()), true) }},
-		{Label: "F7", Text: "MkDir", Role: fkeybar.RoleSuccess, OnClick: func() { doMkdir(app, active()) }},
+		{Label: "F5", Text: "Copy", OnClick: func() { doCopyOrMove(app, active(), other(active()), false) }},
+		{Label: "F6", Text: "Move", OnClick: func() { doCopyOrMove(app, active(), other(active()), true) }},
+		{Label: "F7", Text: "MkDir", OnClick: func() { doMkdir(app, active()) }},
 		{Label: "F8", Text: "Delete", Role: fkeybar.RoleDanger, OnClick: func() { doDelete(app, active()) }},
 		{Label: "F9", Text: "Menu"},
-		{Label: "F10", Text: "Quit", Role: fkeybar.RoleWarning, OnClick: func() { requestQuit(app) }},
+		{Label: "F10", Text: "Quit", OnClick: func() { requestQuit(app) }},
 	})
 }
 
@@ -372,12 +437,11 @@ func newMenuStrip(app *Graphite.Application, active func() *filepane.FilePane, o
 			{Label: "Refresh", Action: func() { active().Reload() }},
 		}},
 		{Label: "Help", Items: []Graphite.MenuItem{
-			{Label: "About", Action: func() {
-				app.ShowMessage(" About ", "Diskette — a dual-pane file manager.", Graphite.BtnDefault)
-			}},
+			{Label: "About", Action: func() { showAbout(app) }},
 		}},
 	})
 	menu.IsFocusable = false
+	menu.BgColor = Graphite.Hex("#FFD23D") // amber, per the project owner — bar and dropdown alike; text auto-contrasts
 	return menu
 }
 
@@ -387,6 +451,43 @@ func requestQuit(app *Graphite.Application) {
 	Graphite.ShowConfirm(app, " Quit ", "Quit Diskette?", Graphite.BtnDanger, func() {
 		app.Quit()
 	})
+}
+
+// showAbout opens a custom modal: the logo (internal/assets.DisketteLogo,
+// embedded into the binary at compile time, decoded once here) on the
+// left, program information on the right. No version number is shown —
+// AGENTS_UNIVERSAL reserves the version-bump decision for the project
+// owner, and none has been authorized yet; a "development build" label is
+// truthful without inventing one.
+func showAbout(app *Graphite.Application) {
+	// Height 27: the logo is 18 rows starting at content row 2 (through
+	// row 19), so the content area needs to be at least that tall plus
+	// room for the Close button below it, not just enough for the info
+	// text — a shorter window here left the button drawn on top of the
+	// image's own bottom rows.
+	mod := Graphite.NewWindow(94, 27, " About ")
+
+	if logo, err := Graphite.ReadGph(bytes.NewReader(assets.DisketteLogo)); err == nil {
+		mod.AddWidget(Graphite.NewImage(2, 2, logo))
+	}
+
+	info := Graphite.NewLabel(40, 2,
+		"Diskette\n\n"+
+			"A cross-platform dual-pane file manager,\n"+
+			"in the style of Total Commander / Midnight\n"+
+			"Commander, built on the graphite TUI\n"+
+			"framework.\n\n"+
+			"Author: Yehor Oblyvantsov\n"+
+			"github.com/yeoblyv/diskette\n\n"+
+			"Development build.")
+	info.Width = 44
+	mod.AddWidget(info)
+
+	mod.AddWidget(Graphite.NewButton(2, -2, "Close", Graphite.BtnDefault, func() {
+		app.CloseModal()
+	}))
+
+	app.SetModal(mod)
 }
 
 // newPathButton creates the clickable bar showing fp's current path.
