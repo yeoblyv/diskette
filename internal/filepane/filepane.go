@@ -783,12 +783,26 @@ func (fp *FilePane) scrollToClick(relY int) {
 	}
 }
 
+// TaggedSummary returns the count and total size of currently tagged
+// entries, and whether anything is tagged at all — exported so a host
+// program's own UI (e.g. a status bar showing "N tagged, X MB" for
+// whichever pane is focused) can read it without duplicating the tagging
+// loop statusLine already does internally.
+func (fp *FilePane) TaggedSummary() (count int, size int64, any bool) {
+	for _, r := range fp.rows {
+		if r.tagged {
+			count++
+			size += r.Size
+		}
+	}
+	return count, size, count > 0
+}
+
 // statusLine summarizes the listing — file/directory counts, and tagged
 // count plus total tagged size once anything is tagged — matching the
 // per-pane summary a classic commander shows along its own bottom edge.
 func (fp *FilePane) statusLine() string {
-	var files, dirs, tagged int
-	var taggedSize int64
+	var files, dirs int
 	for _, r := range fp.rows {
 		if r.isParent {
 			continue
@@ -798,13 +812,9 @@ func (fp *FilePane) statusLine() string {
 		} else {
 			files++
 		}
-		if r.tagged {
-			tagged++
-			taggedSize += r.Size
-		}
 	}
-	if tagged > 0 {
-		return fmt.Sprintf("%d file(s), %d dir(s) — %d tagged (%s)", files, dirs, tagged, formatSize(taggedSize))
+	if tagged, size, any := fp.TaggedSummary(); any {
+		return fmt.Sprintf("%d file(s), %d dir(s) — %d tagged (%s)", files, dirs, tagged, formatSize(size))
 	}
 	return fmt.Sprintf("%d file(s), %d dir(s)", files, dirs)
 }

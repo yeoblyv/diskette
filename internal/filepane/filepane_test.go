@@ -428,6 +428,27 @@ func TestFilePane_StatusLineCountsAndTagging(t *testing.T) {
 	}
 }
 
+func TestFilePane_TaggedSummary(t *testing.T) {
+	fp, _ := newTestPane(t)
+
+	if _, _, any := fp.TaggedSummary(); any {
+		t.Fatal("TaggedSummary() reported something tagged on a fresh pane")
+	}
+
+	var wantSize int64
+	for i, r := range fp.rows {
+		if r.Name == "a.txt" || r.Name == "b.txt" {
+			fp.rows[i].tagged = true
+			wantSize += r.Size
+		}
+	}
+
+	count, size, any := fp.TaggedSummary()
+	if !any || count != 2 || size != wantSize {
+		t.Errorf("TaggedSummary() = (%d, %d, %v), want (2, %d, true)", count, size, any, wantSize)
+	}
+}
+
 // newScrollTestPane creates a pane with far more files than fit on
 // screen, for exercising the scrollbar.
 func newScrollTestPane(t *testing.T) *FilePane {
