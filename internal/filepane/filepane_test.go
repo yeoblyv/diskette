@@ -1,6 +1,7 @@
 package filepane
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -424,6 +425,82 @@ func TestFilePane_StatusLineCountsAndTagging(t *testing.T) {
 	got := fp.statusLine()
 	if !strings.Contains(got, "1 tagged") {
 		t.Errorf("statusLine() with one tagged file = %q, want it to mention \"1 tagged\"", got)
+	}
+}
+
+// newScrollTestPane creates a pane with far more files than fit on
+// screen, for exercising the scrollbar.
+func newScrollTestPane(t *testing.T) *FilePane {
+	t.Helper()
+	dir := t.TempDir()
+	for i := 0; i < 30; i++ {
+		mustWriteFile(t, filepath.Join(dir, fmt.Sprintf("f%02d.txt", i)), "x")
+	}
+	fp := New(0, 0, 40, 12, vfs.LocalFS{}, dir)
+	fp.LastW, fp.LastH = 40, 12 // header + 10 listing rows + status, per visibleRows()
+	return fp
+}
+
+func TestFilePane_ScrollbarClickAtTopJumpsToStart(t *testing.T) {
+	fp := newScrollTestPane(t)
+	fp.scroll = 5
+
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventMouseDown, MouseX: fp.AbsX + fp.LastW - 1, MouseY: fp.AbsY + 1})
+
+	if fp.scroll != 0 {
+		t.Errorf("scroll after clicking the top of the scrollbar = %d, want 0", fp.scroll)
+	}
+}
+
+func TestFilePane_ScrollbarClickAtBottomJumpsToEnd(t *testing.T) {
+	fp := newScrollTestPane(t)
+
+	visible := fp.visibleRows()
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventMouseDown, MouseX: fp.AbsX + fp.LastW - 1, MouseY: fp.AbsY + visible})
+
+	want := fp.scrollbarMaxScroll()
+	if fp.scroll != want {
+		t.Errorf("scroll after clicking the bottom of the scrollbar = %d, want %d (max)", fp.scroll, want)
+	}
+}
+
+func TestFilePane_ScrollbarAbsentWhenEverythingFits(t *testing.T) {
+	fp, _ := newTestPane(t) // only a handful of rows, well under LastH
+	if fp.scrollbarMaxScroll() != 0 {
+		t.Errorf("scrollbarMaxScroll() = %d, want 0 when every row already fits", fp.scrollbarMaxScroll())
+	}
+}
+
+func TestFilePane_HeaderTintReflectsFocus(t *testing.T) {
+	fp, _ := newTestPane(t)
+	canvas := Graphite.NewCanvas()
+	canvas.Resize(40, 10)
+
+	fp.IsFocused = false
+	fp.DrawRelative(canvas, 0, 0, 40, 10)
+	unfocusedBg := canvas.GetCellBg(fp.AbsX, fp.AbsY)
+
+	fp.IsFocused = true
+	fp.DrawRelative(canvas, 0, 0, 40, 10)
+	focusedBg := canvas.GetCellBg(fp.AbsX, fp.AbsY)
+
+	if focusedBg == unfocusedBg {
+		t.Error("the header background is identical focused vs unfocused; the two panes can't be told apart by it")
+	}
+}
+
+func TestFilePane_ExportedToggleTagAndSetSort(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.cursor = 1
+
+	fp.ToggleTag()
+	if !fp.rows[1].tagged {
+		t.Error("ToggleTag did not tag the cursor row")
+	}
+
+	fp.SetSort(SortBySize)
+	if fp.sortField != SortBySize {
+		t.Errorf("SetSort(SortBySize): sortField = %v, want SortBySize", fp.sortField)
 	}
 }
 

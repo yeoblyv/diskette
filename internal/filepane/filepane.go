@@ -9,6 +9,7 @@ package filepane
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode"
@@ -253,6 +254,17 @@ func (fp *FilePane) CanGoBack() bool { return len(fp.backStack) > 0 }
 // CanGoForward reports whether Forward would navigate anywhere.
 func (fp *FilePane) CanGoForward() bool { return len(fp.forwardStack) > 0 }
 
+// ToggleTag flips the tag on the cursor row and advances the cursor,
+// exactly like pressing Insert — exported so a host program's own UI (a
+// menu item, say) can trigger the same tagging gesture Insert does.
+func (fp *FilePane) ToggleTag() { fp.toggleTagAndAdvance() }
+
+// SetSort changes the sort field, toggling direction if field is already
+// active, and re-sorts in place — exported so a host program's own UI (a
+// menu item, say) can trigger the same sort change clicking a column
+// header does.
+func (fp *FilePane) SetSort(field SortField) { fp.setSort(field) }
+
 // Reload re-lists the current directory, preserving the cursor position
 // and tags by entry name where those entries still exist. Callers refresh
 // a pane with this after an operation (copy/move/delete/mkdir/rename) that
@@ -456,10 +468,17 @@ func (fp *FilePane) HandleEvent(ev Graphite.Event) {
 			}
 		}
 
-	case Graphite.EventMouseDown:
+	case Graphite.EventMouseDown, Graphite.EventMouseDrag:
 		relY := ev.MouseY - fp.AbsY
-		if relY == 0 {
+		if ev.Type == Graphite.EventMouseDown && relY == 0 {
 			fp.handleHeaderClick(ev.MouseX - fp.AbsX)
+			return
+		}
+		if ev.MouseX == fp.AbsX+fp.LastW-1 && len(fp.rows) > fp.visibleRows() {
+			fp.scrollToClick(relY - 1)
+			return
+		}
+		if ev.Type == Graphite.EventMouseDrag {
 			return
 		}
 		idx := fp.scroll + relY - 1
@@ -480,8 +499,7 @@ func (fp *FilePane) HandleEvent(ev Graphite.Event) {
 			fp.scroll--
 		}
 	case Graphite.EventMouseScrollDown:
-		maxScroll := len(fp.rows) - fp.visibleRows()
-		if maxScroll > 0 && fp.scroll < maxScroll {
+		if maxScroll := fp.scrollbarMaxScroll(); fp.scroll < maxScroll {
 			fp.scroll++
 		}
 	}
@@ -647,8 +665,16 @@ func (fp *FilePane) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 	fp.BaseWidget.DrawRelative(c, offX, offY, pW, pH)
 	fp.clampScroll()
 
-	headerBg := c.Theme().BgWidget
-	fgDim := c.Theme().FgDisabled
+	theme := c.Theme()
+	headerBg := theme.BgWidget
+	if fp.IsFocused {
+		// A tinted header, not just the cursor row, so which pane is
+		// active reads at a glance regardless of scroll position —
+		// two panes with an otherwise identical dark theme are hard to
+		// tell apart by the cursor highlight alone.
+		headerBg = theme.Primary.Darken(0.75)
+	}
+	fgDim := theme.FgDisabled
 	l := fp.layout()
 
 	for i := 0; i < fp.LastW; i++ {
@@ -674,18 +700,87 @@ func (fp *FilePane) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 		y := fp.AbsY + 1 + i
 		if idx >= len(fp.rows) {
 			for x := 0; x < fp.LastW; x++ {
-				c.DrawCell(fp.AbsX+x, y, " ", c.Theme().BgWidget, c.Theme().FgWindow)
+				c.DrawCell(fp.AbsX+x, y, " ", theme.BgWidget, theme.FgWindow)
 			}
 			continue
 		}
 		fp.drawRow(c, y, l, fp.rows[idx], idx == fp.cursor)
 	}
+	fp.drawScrollbar(c, visible)
 
 	statusY := fp.AbsY + 1 + visible
 	for x := 0; x < fp.LastW; x++ {
 		c.DrawCell(fp.AbsX+x, statusY, " ", headerBg, fgDim)
 	}
 	c.DrawTextBounded(fp.AbsX, statusY, fp.LastW, fp.statusLine(), headerBg, fgDim)
+}
+
+// drawScrollbar paints a thumb-and-track scrollbar in the listing's
+// rightmost column, matching Graphite's own ListBox convention exactly
+// (thumb size proportional to the visible/total ratio), so a pane with
+// more rows than fit is never silently unscrollable-looking. Draws
+// nothing when everything already fits.
+func (fp *FilePane) drawScrollbar(c *Graphite.Canvas, visible int) {
+	if len(fp.rows) <= visible || fp.LastW < 1 {
+		return
+	}
+	theme := c.Theme()
+	thumbH := int(math.Max(1, float64(visible*visible)/float64(len(fp.rows))))
+	maxScroll := len(fp.rows) - visible
+	thumbY := 0
+	if maxScroll > 0 && visible > thumbH {
+		thumbY = (fp.scroll * (visible - thumbH)) / maxScroll
+	}
+	x := fp.AbsX + fp.LastW - 1
+	for i := 0; i < visible; i++ {
+		y := fp.AbsY + 1 + i
+		if i >= thumbY && i < thumbY+thumbH {
+			c.DrawCell(x, y, "█", theme.BgWidget, theme.Primary)
+		} else {
+			c.DrawCell(x, y, "│", theme.BgWidget, theme.FgDisabled)
+		}
+	}
+}
+
+// scrollbarMaxScroll returns how many more rows Scroll can advance,
+// shared by drawScrollbar's thumb math and HandleEvent's click-to-jump so
+// both agree on the same range.
+func (fp *FilePane) scrollbarMaxScroll() int {
+	max := len(fp.rows) - fp.visibleRows()
+	if max < 0 {
+		max = 0
+	}
+	return max
+}
+
+// scrollToClick jumps Scroll based on a click or drag at relY within the
+// scrollbar's track (relative to the first listing row), mirroring
+// Graphite's own ListBox scrollbar convention: near the thumb's own
+// position is a proportional jump, past either end snaps straight there.
+func (fp *FilePane) scrollToClick(relY int) {
+	visible := fp.visibleRows()
+	maxScroll := fp.scrollbarMaxScroll()
+	if maxScroll <= 0 {
+		return
+	}
+	thumbH := int(math.Max(1, float64(visible*visible)/float64(len(fp.rows))))
+
+	switch {
+	case relY < thumbH/2:
+		fp.scroll = 0
+	case relY >= visible-thumbH/2 || visible <= thumbH:
+		fp.scroll = maxScroll
+	default:
+		fraction := float64(relY-thumbH/2) / float64(visible-thumbH)
+		fp.scroll = int(math.Round(fraction * float64(maxScroll)))
+	}
+
+	if fp.scroll < 0 {
+		fp.scroll = 0
+	}
+	if fp.scroll > maxScroll {
+		fp.scroll = maxScroll
+	}
 }
 
 // statusLine summarizes the listing — file/directory counts, and tagged
