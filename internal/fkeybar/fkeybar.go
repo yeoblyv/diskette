@@ -7,15 +7,45 @@ package fkeybar
 
 import Graphite "github.com/yeoblyv/graphite"
 
+// ColorRole selects which theme color a chip's key label uses, so
+// different kinds of action read as visually distinct at a glance instead
+// of the whole bar being one uniform accent color with only the
+// destructive action singled out.
+type ColorRole int
+
+// Supported chip color roles.
+const (
+	RolePrimary ColorRole = iota // the common case: navigation-adjacent, non-destructive actions
+	RoleAccent                   // a structural change worth a second look (e.g. Move)
+	RoleSuccess                  // creating something (e.g. MkDir)
+	RoleWarning                  // exiting/interrupting, not destructive but worth noticing
+	RoleDanger                   // destructive (e.g. Delete)
+)
+
+// color resolves a ColorRole against theme.
+func (r ColorRole) color(theme Graphite.Theme) Graphite.Color {
+	switch r {
+	case RoleAccent:
+		return theme.Accent
+	case RoleSuccess:
+		return theme.Success
+	case RoleWarning:
+		return theme.Warning
+	case RoleDanger:
+		return theme.Danger
+	default:
+		return theme.Primary
+	}
+}
+
 // Key is one F-key/action pair shown in the bar.
 type Key struct {
 	// Label is the key chip's text, e.g. "F5".
 	Label string
 	// Text is the action name shown next to the key chip, e.g. "Copy".
 	Text string
-	// Danger colors the key chip with the theme's Danger color instead of
-	// Primary, for a destructive action (e.g. F8 Delete).
-	Danger bool
+	// Role selects the key chip's color; the zero value is RolePrimary.
+	Role ColorRole
 	// OnClick, if set, runs when this chip is clicked — the bar is a
 	// mouse-accessible duplicate of whatever also triggers on the actual
 	// F-key, not a replacement for it. A nil OnClick renders the chip
@@ -83,10 +113,7 @@ func (b *Bar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 			break
 		}
 
-		keyBg := theme.Primary
-		if k.Danger {
-			keyBg = theme.Danger
-		}
+		keyBg := k.Role.color(theme)
 		textFg := theme.FgWindow
 		if k.OnClick == nil {
 			keyBg = theme.Disabled

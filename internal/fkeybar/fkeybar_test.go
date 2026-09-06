@@ -6,12 +6,24 @@ import (
 	Graphite "github.com/yeoblyv/graphite"
 )
 
+func TestColorRole_ResolvesDistinctColors(t *testing.T) {
+	theme := Graphite.DefaultTheme()
+	seen := map[Graphite.Color]bool{}
+	for _, role := range []ColorRole{RolePrimary, RoleAccent, RoleSuccess, RoleWarning, RoleDanger} {
+		c := role.color(theme)
+		if seen[c] {
+			t.Errorf("role %v resolved to a color already used by another role: %v", role, c)
+		}
+		seen[c] = true
+	}
+}
+
 func TestBar_ClickRunsTheRightKeysOnClick(t *testing.T) {
 	var clicked string
 	bar := New(0, 0, []Key{
 		{Label: "F1", Text: "Help"}, // OnClick nil: inert
 		{Label: "F5", Text: "Copy", OnClick: func() { clicked = "copy" }},
-		{Label: "F8", Text: "Delete", Danger: true, OnClick: func() { clicked = "delete" }},
+		{Label: "F8", Text: "Delete", Role: RoleDanger, OnClick: func() { clicked = "delete" }},
 	})
 	bar.LastW = 80
 	bar.AbsX, bar.AbsY = 0, 0
