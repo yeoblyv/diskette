@@ -1,0 +1,27 @@
+# Build output — never commit binaries or release artifacts
+/dist/
+/release/
+/build/
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.obj
+*.a
+
+# Environment & secrets
+.env
+.env.*
+*.local
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor cruft
+.idea/
+.vscode/
+*.swp
