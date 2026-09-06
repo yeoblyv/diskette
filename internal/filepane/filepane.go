@@ -408,13 +408,20 @@ func (fp *FilePane) moveCursor(delta int) {
 	fp.clampScroll()
 }
 
-// clampScroll adjusts scroll so the cursor row stays within the visible
-// listing area (the widget's height minus the one header row).
-func (fp *FilePane) clampScroll() {
-	visible := fp.LastH - 1
-	if visible < 1 {
-		visible = 1
+// visibleRows returns how many rows are available for the listing itself,
+// after the one header row and one bottom status row (see statusLine).
+func (fp *FilePane) visibleRows() int {
+	v := fp.LastH - 2
+	if v < 1 {
+		v = 1
 	}
+	return v
+}
+
+// clampScroll adjusts scroll so the cursor row stays within the visible
+// listing area.
+func (fp *FilePane) clampScroll() {
+	visible := fp.visibleRows()
 	if fp.cursor < fp.scroll {
 		fp.scroll = fp.cursor
 	}
@@ -473,7 +480,7 @@ func (fp *FilePane) HandleEvent(ev Graphite.Event) {
 			fp.scroll--
 		}
 	case Graphite.EventMouseScrollDown:
-		maxScroll := len(fp.rows) - (fp.LastH - 1)
+		maxScroll := len(fp.rows) - fp.visibleRows()
 		if maxScroll > 0 && fp.scroll < maxScroll {
 			fp.scroll++
 		}
@@ -532,6 +539,7 @@ func isFunctionKey(key Graphite.KeyCode) bool {
 // Fixed widths, in characters, of the optional columns. Name always gets
 // whatever space is left over.
 const (
+	extColWidth  = 5 // e.g. "html"
 	sizeColWidth = 8
 	dateColWidth = 14 // "02.01.06 15:04"
 	attrColWidth = 10 // e.g. "-rw-r--r--"
@@ -539,9 +547,9 @@ const (
 	// minNameWidth is the least a Name column can shrink to before an
 	// optional column is dropped instead — two panes side by side in an
 	// 80-column terminal leave roughly 35 usable columns each, nowhere
-	// near enough for Name plus all three fixed columns (33 chars on
-	// their own), so a narrow pane must degrade by hiding columns rather
-	// than leaving Name too thin to read any name at all.
+	// near enough for Name plus all four fixed columns, so a narrow pane
+	// must degrade by hiding columns rather than leaving Name too thin to
+	// read any name at all.
 	minNameWidth = 10
 )
 
@@ -549,38 +557,58 @@ const (
 // own AbsX, and how wide Name is. A hidden optional column's x is -1.
 type colLayout struct {
 	nameW int
+	extX  int
 	sizeX int
 	dateX int
 	attrX int
 }
 
 // layout picks the widest column set that still leaves Name at least
-// minNameWidth wide, dropping Attr first and then Date as the pane
+// minNameWidth wide, dropping Attr first, then Date, then Ext as the pane
 // narrows — the same graceful degradation a classic commander applies
 // rather than truncating every filename to nothing.
 func (fp *FilePane) layout() colLayout {
 	w := fp.LastW
 
-	if rem := w - (1 + sizeColWidth + 1 + dateColWidth + 1 + attrColWidth); rem >= minNameWidth {
-		sizeX := rem + 1
+	if rem := w - (1 + extColWidth + 1 + sizeColWidth + 1 + dateColWidth + 1 + attrColWidth); rem >= minNameWidth {
+		extX := rem + 1
+		sizeX := extX + extColWidth + 1
 		dateX := sizeX + sizeColWidth + 1
 		attrX := dateX + dateColWidth + 1
-		return colLayout{nameW: rem, sizeX: sizeX, dateX: dateX, attrX: attrX}
+		return colLayout{nameW: rem, extX: extX, sizeX: sizeX, dateX: dateX, attrX: attrX}
+	}
+	if rem := w - (1 + extColWidth + 1 + sizeColWidth + 1 + dateColWidth); rem >= minNameWidth {
+		extX := rem + 1
+		sizeX := extX + extColWidth + 1
+		dateX := sizeX + sizeColWidth + 1
+		return colLayout{nameW: rem, extX: extX, sizeX: sizeX, dateX: dateX, attrX: -1}
 	}
 	if rem := w - (1 + sizeColWidth + 1 + dateColWidth); rem >= minNameWidth {
 		sizeX := rem + 1
 		dateX := sizeX + sizeColWidth + 1
-		return colLayout{nameW: rem, sizeX: sizeX, dateX: dateX, attrX: -1}
+		return colLayout{nameW: rem, extX: -1, sizeX: sizeX, dateX: dateX, attrX: -1}
 	}
 	if rem := w - (1 + sizeColWidth); rem >= minNameWidth {
-		return colLayout{nameW: rem, sizeX: rem + 1, dateX: -1, attrX: -1}
+		return colLayout{nameW: rem, extX: -1, sizeX: rem + 1, dateX: -1, attrX: -1}
 	}
 
 	nameW := w
 	if nameW < 1 {
 		nameW = 1
 	}
-	return colLayout{nameW: nameW, sizeX: -1, dateX: -1, attrX: -1}
+	return colLayout{nameW: nameW, extX: -1, sizeX: -1, dateX: -1, attrX: -1}
+}
+
+// splitExt separates a file's base name from its extension (without the
+// dot), for the classic commander Name/Ext column split. A name with no
+// dot, or a dotfile like ".gitignore" whose only dot is its first
+// character, has no extension.
+func splitExt(name string) (base, ext string) {
+	i := strings.LastIndex(name, ".")
+	if i <= 0 {
+		return name, ""
+	}
+	return name[:i], name[i+1:]
 }
 
 // handleHeaderClick maps a click's x offset within the header row to the
@@ -627,6 +655,9 @@ func (fp *FilePane) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 		c.DrawCell(fp.AbsX+i, fp.AbsY, " ", headerBg, fgDim)
 	}
 	c.DrawTextBounded(fp.AbsX, fp.AbsY, l.nameW, sortLabel("Name", fp.sortField == SortByName, fp.sortDesc), headerBg, fgDim)
+	if l.extX >= 0 {
+		c.DrawTextBounded(fp.AbsX+l.extX, fp.AbsY, extColWidth, "Ext", headerBg, fgDim)
+	}
 	if l.sizeX >= 0 {
 		c.DrawTextBounded(fp.AbsX+l.sizeX, fp.AbsY, sizeColWidth, sortLabel("Size", fp.sortField == SortBySize, fp.sortDesc), headerBg, fgDim)
 	}
@@ -637,7 +668,7 @@ func (fp *FilePane) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 		c.DrawTextBounded(fp.AbsX+l.attrX, fp.AbsY, attrColWidth, "Attr", headerBg, fgDim)
 	}
 
-	visible := fp.LastH - 1
+	visible := fp.visibleRows()
 	for i := 0; i < visible; i++ {
 		idx := fp.scroll + i
 		y := fp.AbsY + 1 + i
@@ -649,6 +680,38 @@ func (fp *FilePane) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 		}
 		fp.drawRow(c, y, l, fp.rows[idx], idx == fp.cursor)
 	}
+
+	statusY := fp.AbsY + 1 + visible
+	for x := 0; x < fp.LastW; x++ {
+		c.DrawCell(fp.AbsX+x, statusY, " ", headerBg, fgDim)
+	}
+	c.DrawTextBounded(fp.AbsX, statusY, fp.LastW, fp.statusLine(), headerBg, fgDim)
+}
+
+// statusLine summarizes the listing — file/directory counts, and tagged
+// count plus total tagged size once anything is tagged — matching the
+// per-pane summary a classic commander shows along its own bottom edge.
+func (fp *FilePane) statusLine() string {
+	var files, dirs, tagged int
+	var taggedSize int64
+	for _, r := range fp.rows {
+		if r.isParent {
+			continue
+		}
+		if r.IsDir {
+			dirs++
+		} else {
+			files++
+		}
+		if r.tagged {
+			tagged++
+			taggedSize += r.Size
+		}
+	}
+	if tagged > 0 {
+		return fmt.Sprintf("%d file(s), %d dir(s) — %d tagged (%s)", files, dirs, tagged, formatSize(taggedSize))
+	}
+	return fmt.Sprintf("%d file(s), %d dir(s)", files, dirs)
 }
 
 // drawRow renders one listing row at absolute row y.
@@ -670,10 +733,13 @@ func (fp *FilePane) drawRow(c *Graphite.Canvas, y int, l colLayout, r row, isCur
 	}
 
 	name := r.Name
+	var ext string
 	if r.isParent {
 		name = ".."
 	} else if r.IsDir {
 		name = "/" + name
+	} else if l.extX >= 0 {
+		name, ext = splitExt(r.Name)
 	}
 	marker := "  "
 	if r.tagged {
@@ -683,6 +749,9 @@ func (fp *FilePane) drawRow(c *Graphite.Canvas, y int, l colLayout, r row, isCur
 
 	if r.isParent {
 		return
+	}
+	if l.extX >= 0 {
+		c.DrawTextBounded(fp.AbsX+l.extX, y, extColWidth, ext, bg, fg)
 	}
 	if l.sizeX >= 0 {
 		sizeStr := ""

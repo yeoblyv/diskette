@@ -3,6 +3,7 @@ package filepane
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -386,6 +387,43 @@ func TestFilePane_TypeAheadResetsAfterTimeout(t *testing.T) {
 
 	if fp.searchBuf != "a" {
 		t.Errorf("searchBuf = %q after a timed-out keystroke, want it reset to just %q", fp.searchBuf, "a")
+	}
+}
+
+func TestSplitExt(t *testing.T) {
+	tests := []struct {
+		name     string
+		wantBase string
+		wantExt  string
+	}{
+		{"app.go", "app", "go"},
+		{"archive.tar.gz", "archive.tar", "gz"},
+		{"README", "README", ""},
+		{".gitignore", ".gitignore", ""},
+	}
+	for _, tc := range tests {
+		base, ext := splitExt(tc.name)
+		if base != tc.wantBase || ext != tc.wantExt {
+			t.Errorf("splitExt(%q) = (%q, %q), want (%q, %q)", tc.name, base, ext, tc.wantBase, tc.wantExt)
+		}
+	}
+}
+
+func TestFilePane_StatusLineCountsAndTagging(t *testing.T) {
+	fp, _ := newTestPane(t)
+
+	if got := fp.statusLine(); got != "2 file(s), 1 dir(s)" {
+		t.Errorf("statusLine() = %q, want %q", got, "2 file(s), 1 dir(s)")
+	}
+
+	for i, r := range fp.rows {
+		if r.Name == "b.txt" {
+			fp.rows[i].tagged = true
+		}
+	}
+	got := fp.statusLine()
+	if !strings.Contains(got, "1 tagged") {
+		t.Errorf("statusLine() with one tagged file = %q, want it to mention \"1 tagged\"", got)
 	}
 }
 
