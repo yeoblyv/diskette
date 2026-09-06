@@ -193,49 +193,51 @@ func newNavRow(app *Graphite.Application, fp *filepane.FilePane) *Graphite.Flex 
 // fixed-size buttons centers them in the gutter's full height instead of
 // leaving them stacked at the top. ZIP/UNZIP is a placeholder: disabled
 // (grayed out, inert) until archive pack/unpack between the two panes is
-// actually implemented, shown now rather than added later so the gutter's
-// eventual layout doesn't shift underneath whatever already got used to it.
+// actually implemented, shown now — as two buttons, Zip and Unzip, the same
+// shape as Copy/Move rather than one combined button — rather than added
+// later so the gutter's eventual layout doesn't shift underneath whatever
+// already got used to it. Each button's Width 0 stretches it to the
+// gutter's full width (see dirButton's own DrawRelative for why that
+// requires a custom widget rather than a plain Button).
 func newActionGutter(app *Graphite.Application, left, right *filepane.FilePane) *Graphite.Flex {
 	gutter := Graphite.NewFlex(0, 0, 15, 0, Graphite.FlexColumn)
 	gutter.Gap = 1
 	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
-	gutter.AddChild(newDirButton(app, left, right, "Copy", false), 0)
-	gutter.AddChild(newDirButton(app, left, right, "Move", true), 0)
-	gutter.AddChild(newZipButton(), 0)
+	gutter.AddChild(newDirButton(left, right, "Copy", func(src, dst *filepane.FilePane) {
+		doCopyOrMove(app, src, dst, false)
+	}), 0)
+	gutter.AddChild(newDirButton(left, right, "Move", func(src, dst *filepane.FilePane) {
+		doCopyOrMove(app, src, dst, true)
+	}), 0)
+	gutter.AddChild(newDirButton(left, right, "Zip", nil), 0)
+	gutter.AddChild(newDirButton(left, right, "Unzip", nil), 0)
 	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
 	return gutter
 }
 
-// newZipButton creates the disabled ZIP/UNZIP placeholder button: archiving
-// and extracting directly between the two panes isn't implemented yet, so
-// it's shown grayed out and inert (Graphite.Button's own disabled styling)
-// rather than left off the gutter entirely.
-func newZipButton() *Graphite.Button {
-	btn := Graphite.NewButton(0, 0, "ZIP/UNZIP", Graphite.BtnDefault, nil)
-	btn.IsFocusable = false
-	btn.Enabled = false
-	return btn
-}
-
-// dirButton is a Copy/Move gutter button whose label names whichever pane
-// currently has focus as the source and the other one as the destination,
-// recomputed every frame (there is no "focus changed" event to hook, so
-// drawing fresh is what keeps it honest) — a mouse-driven duplicate of
-// F5/F6 for someone who'd rather click an explicit direction than rely on
-// "whichever pane is active." Deliberately not a Graphite.Button: Button's
-// Text is a plain field with no per-frame hook, so a label that must track
-// live state needs its own DrawRelative.
+// dirButton is a gutter button whose label names whichever pane currently
+// has focus as the source and the other one as the destination, recomputed
+// every frame (there is no "focus changed" event to hook, so drawing fresh
+// is what keeps it honest). Copy/Move are wired to onClick; Zip/Unzip pass
+// a nil onClick and render dimmed and inert, the same shape as Copy/Move
+// so the gutter reads as one consistent design, ready to wire up once
+// archiving is implemented. Deliberately not a Graphite.Button: a Button's
+// background only fills the exact width its own text occupies, not
+// whatever extra width a Flex weight hands it, and its Text is a plain
+// field with no per-frame hook for a label that must track live state.
 type dirButton struct {
 	Graphite.BaseWidget
-	app         *Graphite.Application
 	left, right *filepane.FilePane
 	action      string
-	move        bool
+	onClick     func(src, dst *filepane.FilePane)
 }
 
-func newDirButton(app *Graphite.Application, left, right *filepane.FilePane, action string, move bool) *dirButton {
-	base := Graphite.NewBaseWidget(0, 0, 10, 1)
-	return &dirButton{BaseWidget: base, app: app, left: left, right: right, action: action, move: move}
+// newDirButton creates a dirButton with Width 0, stretching it to fill
+// whatever width its parent Flex offers (see BaseWidget's zero/negative
+// width convention). A nil onClick renders it dimmed and inert.
+func newDirButton(left, right *filepane.FilePane, action string, onClick func(src, dst *filepane.FilePane)) *dirButton {
+	base := Graphite.NewBaseWidget(0, 0, 0, 1)
+	return &dirButton{BaseWidget: base, left: left, right: right, action: action, onClick: onClick}
 }
 
 // srcDst returns (source, destination) for this click: always from
@@ -258,25 +260,37 @@ func (d *dirButton) label() string {
 	return d.action + " ▶"
 }
 
-// DrawRelative implements Graphite.Widget.
+// DrawRelative implements Graphite.Widget. The label is centered in the
+// button's full (stretched) width rather than left-aligned, so it reads as
+// centered content inside a wide button instead of hugging one edge.
 func (d *dirButton) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 	d.BaseWidget.DrawRelative(c, offX, offY, pW, pH)
-	fg := navAccent.ContrastText()
-	for x := 0; x < d.LastW; x++ {
-		c.DrawCell(d.AbsX+x, d.AbsY, " ", navAccent, fg)
+	theme := c.Theme()
+	bg, fg := navAccent, navAccent.ContrastText()
+	if d.onClick == nil {
+		bg, fg = theme.Disabled, theme.FgDisabled
 	}
-	c.DrawTextBounded(d.AbsX, d.AbsY, d.LastW, "[ "+d.label()+" ]", navAccent, fg)
+	for x := 0; x < d.LastW; x++ {
+		c.DrawCell(d.AbsX+x, d.AbsY, " ", bg, fg)
+	}
+	text := "[ " + d.label() + " ]"
+	pad := (d.LastW - len([]rune(text))) / 2
+	if pad < 0 {
+		pad = 0
+	}
+	c.DrawTextBounded(d.AbsX+pad, d.AbsY, d.LastW-pad, text, bg, fg)
 }
 
-// HandleEvent implements Graphite.Widget: a click runs Copy/Move with
+// HandleEvent implements Graphite.Widget: a click runs onClick with
 // srcDst's direction as of this exact click, not whatever it was when the
-// button was constructed.
+// button was constructed. A nil onClick (Zip/Unzip, not implemented yet)
+// makes the button inert.
 func (d *dirButton) HandleEvent(ev Graphite.Event) {
-	if ev.Type != Graphite.EventMouseDown {
+	if ev.Type != Graphite.EventMouseDown || d.onClick == nil {
 		return
 	}
 	src, dst := d.srcDst()
-	doCopyOrMove(d.app, src, dst, d.move)
+	d.onClick(src, dst)
 }
 
 // diskUsageCache is a snapshot of diskspace.Query for one pane, refreshed
