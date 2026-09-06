@@ -17,10 +17,18 @@ import (
 	"github.com/yeoblyv/diskette/internal/diskspace"
 	"github.com/yeoblyv/diskette/internal/filepane"
 	"github.com/yeoblyv/diskette/internal/fkeybar"
+	"github.com/yeoblyv/diskette/internal/openwith"
 	"github.com/yeoblyv/diskette/internal/roots"
 	"github.com/yeoblyv/diskette/internal/theme"
 	"github.com/yeoblyv/diskette/internal/vfs"
 )
+
+// navAccent is the oceanic accent color shared by the navigation row's
+// buttons and the copy/move gutter buttons, so both stand out against the
+// chrome background instead of blending into it — distinct from Primary
+// (pane focus/cursor) and Warning (the menu strip), which already carry
+// their own meaning.
+var navAccent = Graphite.Hex("#5DE4FF")
 
 func main() {
 	start, err := os.Getwd()
@@ -37,6 +45,8 @@ func main() {
 
 	left := filepane.New(0, 0, 0, 0, fs, start)
 	right := filepane.New(0, 0, 0, 0, fs, start)
+	left.OnOpenFile = func(path string) { openFile(app, path) }
+	right.OnOpenFile = func(path string) { openFile(app, path) }
 
 	activePane := func() *filepane.FilePane {
 		if right.HasFocus() {
@@ -85,7 +95,7 @@ func main() {
 	rightCol.AddChild(rightNav, 0)
 	rightCol.AddChild(right, 1)
 
-	mainRow := Graphite.NewFlex(0, 1, 0, -2, Graphite.FlexRow)
+	mainRow := Graphite.NewFlex(0, 2, 0, -2, Graphite.FlexRow)
 	mainRow.Gap = 1
 	mainRow.AddChild(leftCol, 1)
 	mainRow.AddChild(newActionGutter(app, left, right), 0)
@@ -144,7 +154,18 @@ func main() {
 func newNavButton(label string, onClick func()) *Graphite.Button {
 	btn := Graphite.NewButton(0, 0, label, Graphite.BtnDefault, onClick)
 	btn.IsFocusable = false
+	btn.BgColor = navAccent
 	return btn
+}
+
+// openFile hands path to the OS's associated default application — the
+// same effect as double-clicking it in Finder/Explorer — reporting a
+// failure (e.g. no handler registered for the file's type) the same way
+// every other file operation reports one.
+func openFile(app *Graphite.Application, path string) {
+	if err := openwith.Open(path); err != nil {
+		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+	}
 }
 
 // newNavRow builds one pane's navigation strip — Back/Forward/Refresh, a
@@ -170,25 +191,29 @@ func newNavRow(app *Graphite.Application, fp *filepane.FilePane) (*Graphite.Flex
 
 // newActionGutter builds the fixed-width column between the two panes
 // holding Copy and Move — two buttons, not four: each is a dirButton whose
-// arrow flips to always point from the focused pane toward the other one,
-// recomputed fresh every frame, rather than a separate static button per
-// direction.
+// label flips to always name the focused pane as source and the other one
+// as destination, recomputed fresh every frame, rather than a separate
+// static button per direction. A weight-1 spacer above and below the two
+// fixed-size buttons centers them in the gutter's full height instead of
+// leaving them stacked at the top.
 func newActionGutter(app *Graphite.Application, left, right *filepane.FilePane) *Graphite.Flex {
-	gutter := Graphite.NewFlex(0, 0, 11, 0, Graphite.FlexColumn)
+	gutter := Graphite.NewFlex(0, 0, 16, 0, Graphite.FlexColumn)
 	gutter.Gap = 1
+	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
 	gutter.AddChild(newDirButton(app, left, right, "Copy", false), 0)
 	gutter.AddChild(newDirButton(app, left, right, "Move", true), 0)
+	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
 	return gutter
 }
 
-// dirButton is a Copy/Move gutter button whose label and arrow direction
-// reflect whichever pane currently has focus, recomputed every frame
-// (there is no "focus changed" event to hook, so drawing fresh is what
-// keeps it honest) — a mouse-driven duplicate of F5/F6 for someone who'd
-// rather click an explicit direction than rely on "whichever pane is
-// active." Deliberately not a Graphite.Button: Button's Text is a plain
-// field with no per-frame hook, so a label that must track live state
-// needs its own DrawRelative.
+// dirButton is a Copy/Move gutter button whose label names whichever pane
+// currently has focus as the source and the other one as the destination,
+// recomputed every frame (there is no "focus changed" event to hook, so
+// drawing fresh is what keeps it honest) — a mouse-driven duplicate of
+// F5/F6 for someone who'd rather click an explicit direction than rely on
+// "whichever pane is active." Deliberately not a Graphite.Button: Button's
+// Text is a plain field with no per-frame hook, so a label that must track
+// live state needs its own DrawRelative.
 type dirButton struct {
 	Graphite.BaseWidget
 	app         *Graphite.Application
@@ -198,7 +223,7 @@ type dirButton struct {
 }
 
 func newDirButton(app *Graphite.Application, left, right *filepane.FilePane, action string, move bool) *dirButton {
-	base := Graphite.NewBaseWidget(0, 0, 11, 1)
+	base := Graphite.NewBaseWidget(0, 0, 14, 1)
 	return &dirButton{BaseWidget: base, app: app, left: left, right: right, action: action, move: move}
 }
 
@@ -211,22 +236,24 @@ func (d *dirButton) srcDst() (src, dst *filepane.FilePane) {
 	return d.left, d.right
 }
 
-// label returns this frame's button text, arrow pointing toward dst.
+// label returns this frame's button text, naming the destination pane
+// explicitly (e.g. "Copy Right") rather than an arrow glyph, since it's the
+// destination — not merely a direction — that the button actually acts on.
 func (d *dirButton) label() string {
 	if d.right.HasFocus() {
-		return "◀ " + d.action
+		return d.action + " Left"
 	}
-	return "▶ " + d.action
+	return d.action + " Right"
 }
 
 // DrawRelative implements Graphite.Widget.
 func (d *dirButton) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 	d.BaseWidget.DrawRelative(c, offX, offY, pW, pH)
-	theme := c.Theme()
+	fg := navAccent.ContrastText()
 	for x := 0; x < d.LastW; x++ {
-		c.DrawCell(d.AbsX+x, d.AbsY, " ", theme.BgWidget, theme.FgWindow)
+		c.DrawCell(d.AbsX+x, d.AbsY, " ", navAccent, fg)
 	}
-	c.DrawTextBounded(d.AbsX, d.AbsY, d.LastW, "[ "+d.label()+" ]", theme.BgWidget, theme.FgWindow)
+	c.DrawTextBounded(d.AbsX, d.AbsY, d.LastW, "[ "+d.label()+" ]", navAccent, fg)
 }
 
 // HandleEvent implements Graphite.Widget: a click runs Copy/Move with
@@ -296,7 +323,7 @@ func (d *diskSpaceBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) 
 	d.BaseWidget.DrawRelative(c, offX, offY, pW, pH)
 	theme := c.Theme()
 	for x := 0; x < d.LastW; x++ {
-		c.DrawCell(d.AbsX+x, d.AbsY, " ", theme.BgScreen, theme.FgWindow)
+		c.DrawCell(d.AbsX+x, d.AbsY, " ", theme.BgWindow, theme.FgWindow)
 	}
 
 	const (
@@ -318,21 +345,21 @@ func (d *diskSpaceBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) 
 	if state.hasTagged {
 		taggedText = fmt.Sprintf("Tagged: %d item(s), %s", state.taggedCount, formatBytes(uint64(state.taggedSize)))
 	}
-	c.DrawTextBounded(d.AbsX, d.AbsY, taggedSegW, taggedText, theme.BgScreen, theme.FgWindow)
+	c.DrawTextBounded(d.AbsX, d.AbsY, taggedSegW, taggedText, theme.BgWindow, theme.FgWindow)
 
 	dividerX1 := d.AbsX + taggedSegW
-	c.DrawCell(dividerX1, d.AbsY, "│", theme.BgScreen, theme.FgDisabled)
+	c.DrawCell(dividerX1, d.AbsY, "│", theme.BgWindow, theme.FgDisabled)
 
 	diskX := dividerX1 + 1
 	d.drawDiskSegmentUsage(c, diskX, diskSegW, state.usage)
 
 	dividerX2 := diskX + diskSegW
-	c.DrawCell(dividerX2, d.AbsY, "│", theme.BgScreen, theme.FgDisabled)
+	c.DrawCell(dividerX2, d.AbsY, "│", theme.BgWindow, theme.FgDisabled)
 
 	// Reserved for remote-connection status once a server pane exists
 	// (see the project's SFTP phase) — "Local" is accurate today, not a
 	// placeholder pretending to be a real connection indicator.
-	c.DrawTextBounded(dividerX2+1, d.AbsY, serverSegW-1, "Server: Local", theme.BgScreen, theme.FgDisabled)
+	c.DrawTextBounded(dividerX2+1, d.AbsY, serverSegW-1, "Server: Local", theme.BgWindow, theme.FgDisabled)
 }
 
 // drawDiskSegment resolves state itself, for the narrow-terminal fallback
@@ -346,7 +373,7 @@ func (d *diskSpaceBar) drawDiskSegment(c *Graphite.Canvas, x, w int) {
 func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache diskUsageCache) {
 	theme := c.Theme()
 	if !cache.ok || cache.usage.Total == 0 {
-		c.DrawTextBounded(x, d.AbsY, w, "Disk: n/a", theme.BgScreen, theme.FgDisabled)
+		c.DrawTextBounded(x, d.AbsY, w, "Disk: n/a", theme.BgWindow, theme.FgDisabled)
 		return
 	}
 
@@ -356,13 +383,13 @@ func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache 
 
 	barW := w - len([]rune(label)) - 3
 	if barW < 10 {
-		c.DrawTextBounded(x, d.AbsY, w, label, theme.BgScreen, theme.FgWindow)
+		c.DrawTextBounded(x, d.AbsY, w, label, theme.BgWindow, theme.FgWindow)
 		return
 	}
 
-	c.DrawTextBounded(x, d.AbsY, len([]rune(label)), label, theme.BgScreen, theme.FgWindow)
+	c.DrawTextBounded(x, d.AbsY, len([]rune(label)), label, theme.BgWindow, theme.FgWindow)
 	barX := x + len([]rune(label)) + 1
-	c.DrawCell(barX, d.AbsY, "[", theme.BgScreen, theme.FgWindow)
+	c.DrawCell(barX, d.AbsY, "[", theme.BgWindow, theme.FgWindow)
 	barX++
 	filled := int(usedPct / 100 * float64(barW))
 	barColor := theme.Primary
@@ -373,12 +400,12 @@ func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache 
 	}
 	for i := 0; i < barW; i++ {
 		if i < filled {
-			c.DrawCell(barX+i, d.AbsY, "█", theme.BgScreen, barColor)
+			c.DrawCell(barX+i, d.AbsY, "█", theme.BgWindow, barColor)
 		} else {
-			c.DrawCell(barX+i, d.AbsY, "░", theme.BgScreen, theme.Disabled)
+			c.DrawCell(barX+i, d.AbsY, "░", theme.BgWindow, theme.Disabled)
 		}
 	}
-	c.DrawCell(barX+barW, d.AbsY, "]", theme.BgScreen, theme.FgWindow)
+	c.DrawCell(barX+barW, d.AbsY, "]", theme.BgWindow, theme.FgWindow)
 }
 
 // newFKeyBar builds the bottom action bar. F1/F3/F4/F9 are listed with no

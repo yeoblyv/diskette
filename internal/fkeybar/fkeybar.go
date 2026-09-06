@@ -100,7 +100,7 @@ func (b *Bar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 	theme := c.Theme()
 
 	for i := 0; i < b.LastW; i++ {
-		c.DrawCell(b.AbsX+i, b.AbsY, " ", theme.BgScreen, theme.FgWindow)
+		c.DrawCell(b.AbsX+i, b.AbsY, " ", theme.BgWindow, theme.FgWindow)
 	}
 
 	edge := b.rightEdge()
@@ -109,7 +109,7 @@ func (b *Bar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 	for _, k := range b.Keys {
 		keyW, textW := chipWidths(k)
 		if x+keyW+textW > edge {
-			c.DrawCell(x, b.AbsY, "…", theme.BgScreen, theme.FgDisabled)
+			c.DrawCell(x, b.AbsY, "…", theme.BgWindow, theme.FgDisabled)
 			break
 		}
 
@@ -122,12 +122,12 @@ func (b *Bar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 
 		c.DrawTextBounded(x, b.AbsY, keyW, " "+k.Label, keyBg, theme.BgScreen)
 		x += keyW
-		c.DrawTextBounded(x, b.AbsY, textW, " "+k.Text, theme.BgWidget, textFg)
+		c.DrawTextBounded(x, b.AbsY, textW, " "+k.Text, theme.BgWindow, textFg)
 		x += textW + 1
 	}
 
 	if b.Status != "" && edge > x {
-		c.DrawTextBounded(edge, b.AbsY, b.AbsX+b.LastW-edge, b.Status+" ", theme.BgScreen, theme.FgDisabled)
+		c.DrawTextBounded(edge, b.AbsY, b.AbsX+b.LastW-edge, b.Status+" ", theme.BgWindow, theme.FgDisabled)
 	}
 }
 
