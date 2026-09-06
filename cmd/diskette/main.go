@@ -61,7 +61,7 @@ func main() {
 		return left
 	}
 
-	fKeyBar := newFKeyBar(app, activePane, otherPane)
+	fKeyBar := newFKeyBar(app, right, activePane, otherPane)
 
 	refreshStatus := func() {
 		if q := activePane().SearchQuery(); q != "" {
@@ -80,10 +80,10 @@ func main() {
 		diskUsage[i] = diskUsageCache{usage: u, ok: err == nil}
 	}
 
-	leftNav, leftPathBtn := newNavRow(app, left)
-	rightNav, rightPathBtn := newNavRow(app, right)
-	left.OnPathChanged = func(path string) { setButtonText(leftPathBtn, path); refreshDiskUsage(left, 0) }
-	right.OnPathChanged = func(path string) { setButtonText(rightPathBtn, path); refreshDiskUsage(right, 1) }
+	leftNav := newNavRow(app, left)
+	rightNav := newNavRow(app, right)
+	left.OnPathChanged = func(string) { refreshDiskUsage(left, 0) }
+	right.OnPathChanged = func(string) { refreshDiskUsage(right, 1) }
 	refreshDiskUsage(left, 0)
 	refreshDiskUsage(right, 1)
 
@@ -173,37 +173,48 @@ func openFile(app *Graphite.Application, path string) {
 // the path bar always fills exactly the space the fixed-width buttons
 // leave, at any terminal width. There is deliberately no "up one level"
 // button: the ".." row already at the top of every listing does that, via
-// Enter or a double-click, exactly like every other entry. It returns the
-// row and the path button separately so the caller can keep updating the
-// button's text as fp navigates.
-func newNavRow(app *Graphite.Application, fp *filepane.FilePane) (*Graphite.Flex, *Graphite.Button) {
-	pathBtn := newPathButton(app, fp)
-
+// Enter or a double-click, exactly like every other entry.
+func newNavRow(app *Graphite.Application, fp *filepane.FilePane) *Graphite.Flex {
 	row := Graphite.NewFlex(0, 0, 0, 1, Graphite.FlexRow)
 	row.Gap = 1
 	row.AddChild(newNavButton("<", func() { fp.Back() }), 0)
 	row.AddChild(newNavButton(">", func() { fp.Forward() }), 0)
 	row.AddChild(newNavButton("Reload", func() { fp.Reload() }), 0)
 	row.AddChild(newNavButton("Root", func() { promptChooseRoot(app, fp) }), 0)
-	row.AddChild(pathBtn, 1)
-	return row, pathBtn
+	row.AddChild(newPathBar(app, fp), 1)
+	return row
 }
 
 // newActionGutter builds the fixed-width column between the two panes
 // holding Copy and Move — two buttons, not four: each is a dirButton whose
 // label flips to always name the focused pane as source and the other one
 // as destination, recomputed fresh every frame, rather than a separate
-// static button per direction. A weight-1 spacer above and below the two
+// static button per direction. A weight-1 spacer above and below the three
 // fixed-size buttons centers them in the gutter's full height instead of
-// leaving them stacked at the top.
+// leaving them stacked at the top. ZIP/UNZIP is a placeholder: disabled
+// (grayed out, inert) until archive pack/unpack between the two panes is
+// actually implemented, shown now rather than added later so the gutter's
+// eventual layout doesn't shift underneath whatever already got used to it.
 func newActionGutter(app *Graphite.Application, left, right *filepane.FilePane) *Graphite.Flex {
-	gutter := Graphite.NewFlex(0, 0, 16, 0, Graphite.FlexColumn)
+	gutter := Graphite.NewFlex(0, 0, 15, 0, Graphite.FlexColumn)
 	gutter.Gap = 1
 	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
 	gutter.AddChild(newDirButton(app, left, right, "Copy", false), 0)
 	gutter.AddChild(newDirButton(app, left, right, "Move", true), 0)
+	gutter.AddChild(newZipButton(), 0)
 	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
 	return gutter
+}
+
+// newZipButton creates the disabled ZIP/UNZIP placeholder button: archiving
+// and extracting directly between the two panes isn't implemented yet, so
+// it's shown grayed out and inert (Graphite.Button's own disabled styling)
+// rather than left off the gutter entirely.
+func newZipButton() *Graphite.Button {
+	btn := Graphite.NewButton(0, 0, "ZIP/UNZIP", Graphite.BtnDefault, nil)
+	btn.IsFocusable = false
+	btn.Enabled = false
+	return btn
 }
 
 // dirButton is a Copy/Move gutter button whose label names whichever pane
@@ -223,7 +234,7 @@ type dirButton struct {
 }
 
 func newDirButton(app *Graphite.Application, left, right *filepane.FilePane, action string, move bool) *dirButton {
-	base := Graphite.NewBaseWidget(0, 0, 14, 1)
+	base := Graphite.NewBaseWidget(0, 0, 10, 1)
 	return &dirButton{BaseWidget: base, app: app, left: left, right: right, action: action, move: move}
 }
 
@@ -236,14 +247,15 @@ func (d *dirButton) srcDst() (src, dst *filepane.FilePane) {
 	return d.left, d.right
 }
 
-// label returns this frame's button text, naming the destination pane
-// explicitly (e.g. "Copy Right") rather than an arrow glyph, since it's the
-// destination — not merely a direction — that the button actually acts on.
+// label returns this frame's button text: the arrow sits on whichever side
+// faces the destination pane — trailing ("Copy ▶") when copying rightward,
+// leading ("◀ Copy") when copying leftward — so the glyph itself points
+// toward where the files are actually going.
 func (d *dirButton) label() string {
 	if d.right.HasFocus() {
-		return d.action + " Left"
+		return "◀ " + d.action
 	}
-	return d.action + " Right"
+	return d.action + " ▶"
 }
 
 // DrawRelative implements Graphite.Widget.
@@ -417,19 +429,32 @@ func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache 
 // which is destructive and stays RoleDanger — one accent color for
 // everything, one exception, exactly as specified, not a color per
 // action.
-func newFKeyBar(app *Graphite.Application, active func() *filepane.FilePane, other func(*filepane.FilePane) *filepane.FilePane) *fkeybar.Bar {
-	return fkeybar.New(0, -1, []fkeybar.Key{
+func newFKeyBar(app *Graphite.Application, right *filepane.FilePane, active func() *filepane.FilePane, other func(*filepane.FilePane) *filepane.FilePane) *fkeybar.Bar {
+	bar := fkeybar.New(0, -1, []fkeybar.Key{
 		{Label: "F1", Text: "Help"},
 		{Label: "F2", Text: "Rename", OnClick: func() { doRename(app, active()) }},
 		{Label: "F3", Text: "View"},
 		{Label: "F4", Text: "Edit"},
-		{Label: "F5", Text: "Copy", OnClick: func() { doCopyOrMove(app, active(), other(active()), false) }},
-		{Label: "F6", Text: "Move", OnClick: func() { doCopyOrMove(app, active(), other(active()), true) }},
+		{Label: "F5", Text: "Copy Right", OnClick: func() { doCopyOrMove(app, active(), other(active()), false) }},
+		{Label: "F6", Text: "Move Right", OnClick: func() { doCopyOrMove(app, active(), other(active()), true) }},
 		{Label: "F7", Text: "MkDir", OnClick: func() { doMkdir(app, active()) }},
 		{Label: "F8", Text: "Delete", Role: fkeybar.RoleDanger, OnClick: func() { doDelete(app, active()) }},
 		{Label: "F9", Text: "Menu"},
 		{Label: "F10", Text: "Quit", OnClick: func() { requestQuit(app) }},
 	})
+	// F5/F6's Text names the destination pane explicitly, kept current
+	// every frame the same way dirButton's own label does — there is no
+	// "focus changed" event to hook it from instead.
+	const copyIdx, moveIdx = 4, 5
+	bar.OnBeforeDraw = func() {
+		dir := "Right"
+		if right.HasFocus() {
+			dir = "Left"
+		}
+		bar.Keys[copyIdx].Text = "Copy " + dir
+		bar.Keys[moveIdx].Text = "Move " + dir
+	}
+	return bar
 }
 
 // newMenuStrip builds the top menu bar as a mouse-only duplicate of the
@@ -517,22 +542,56 @@ func showAbout(app *Graphite.Application) {
 	app.SetModal(mod)
 }
 
-// newPathButton creates the clickable bar showing fp's current path.
-// Width is forced to 0 so it stretches to fill whatever space newNavRow's
-// Flex offers it, rather than staying sized to the path it was
-// constructed with.
-func newPathButton(app *Graphite.Application, fp *filepane.FilePane) *Graphite.Button {
-	btn := Graphite.NewButton(0, 0, fp.Path(), Graphite.BtnDefault, func() {
-		promptGoTo(app, fp)
-	})
-	btn.IsFocusable = false
-	btn.Width = 0
-	return btn
+// pathBar is the clickable current-path strip in newNavRow: it reads fp's
+// path fresh every frame (so there is no separate "update the button text"
+// call to wire through OnPathChanged) and colors itself from whether fp
+// itself has focus, not the bar's own — Button's IsFocused only reflects
+// the Tab-focus of the (deliberately non-focusable) bar, never the pane it
+// labels. It also fills its full stretched width with that color, which is
+// what actually reads as an input strip spanning the row rather than a
+// small button floating in a stretch of empty chrome — a plain Button's
+// DrawTextBounded only paints the exact cells its own text occupies, not
+// whatever extra width a Flex weight handed it.
+type pathBar struct {
+	Graphite.BaseWidget
+	app *Graphite.Application
+	fp  *filepane.FilePane
 }
 
-// setButtonText updates a path button's label.
-func setButtonText(b *Graphite.Button, text string) {
-	b.Text = text
+// newPathBar creates a pathBar at (0, 0) with Width 0, i.e. "stretch to
+// fill whatever space newNavRow's Flex offers it" (see BaseWidget's
+// negative/zero-width convention).
+func newPathBar(app *Graphite.Application, fp *filepane.FilePane) *pathBar {
+	base := Graphite.NewBaseWidget(0, 0, 0, 1)
+	base.IsFocusable = false
+	return &pathBar{BaseWidget: base, app: app, fp: fp}
+}
+
+// DrawRelative implements Graphite.Widget.
+func (p *pathBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
+	p.BaseWidget.DrawRelative(c, offX, offY, pW, pH)
+	// Bright navAccent while fp has focus (matching the nav buttons beside
+	// it), a faint tint of the same hue otherwise — enough to still read as
+	// "the same kind of control" without competing with the focused pane's
+	// own accent-colored header/cursor.
+	bg := navAccent.Darken(0.75)
+	if p.fp.HasFocus() {
+		bg = navAccent
+	}
+	fg := bg.ContrastText()
+	for x := 0; x < p.LastW; x++ {
+		c.DrawCell(p.AbsX+x, p.AbsY, " ", bg, fg)
+	}
+	c.DrawTextBounded(p.AbsX, p.AbsY, p.LastW, "[ "+p.fp.Path()+" ]", bg, fg)
+}
+
+// HandleEvent implements Graphite.Widget: a click opens the same
+// go-to-folder prompt as before.
+func (p *pathBar) HandleEvent(ev Graphite.Event) {
+	if ev.Type != Graphite.EventMouseDown {
+		return
+	}
+	promptGoTo(p.app, p.fp)
 }
 
 // promptGoTo is Diskette's cd-bar: a modal prompting for a path, rather
