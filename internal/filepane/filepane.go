@@ -332,14 +332,24 @@ func (fp *FilePane) activateCursor() {
 	}
 }
 
+// toggleTagAt flips the tag on row idx. It is a no-op on an out-of-range
+// index or the ".." row, which can never be tagged.
+func (fp *FilePane) toggleTagAt(idx int) {
+	if idx < 0 || idx >= len(fp.rows) || fp.rows[idx].isParent {
+		return
+	}
+	fp.rows[idx].tagged = !fp.rows[idx].tagged
+}
+
 // toggleTagAndAdvance flips the tag on the cursor row and moves the
-// cursor down one — Insert's classic commander behavior. It is a no-op on
-// the ".." row, which can never be tagged.
+// cursor down one — Insert's classic commander behavior, for tagging a
+// contiguous run without touching the mouse. It is a no-op (including the
+// advance) on the ".." row, which can never be tagged.
 func (fp *FilePane) toggleTagAndAdvance() {
 	if fp.cursor < 0 || fp.cursor >= len(fp.rows) || fp.rows[fp.cursor].isParent {
 		return
 	}
-	fp.rows[fp.cursor].tagged = !fp.rows[fp.cursor].tagged
+	fp.toggleTagAt(fp.cursor)
 	if fp.cursor < len(fp.rows)-1 {
 		fp.cursor++
 		fp.clampScroll()
@@ -502,6 +512,18 @@ func (fp *FilePane) HandleEvent(ev Graphite.Event) {
 			}
 			fp.lastClickIdx = idx
 			fp.lastClickTime = now
+		}
+
+	case Graphite.EventMouseRightDown:
+		relY := ev.MouseY - fp.AbsY
+		if relY == 0 {
+			return // the header row has nothing to tag
+		}
+		idx := fp.scroll + relY - 1
+		if idx >= 0 && idx < len(fp.rows) {
+			fp.cursor = idx
+			fp.clampScroll()
+			fp.toggleTagAt(idx)
 		}
 
 	case Graphite.EventMouseScrollUp:

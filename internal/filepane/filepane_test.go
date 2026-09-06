@@ -164,6 +164,48 @@ func TestFilePane_ToggleTagAndAdvance(t *testing.T) {
 	}
 }
 
+func TestFilePane_RightClickTogglesTagWithoutAdvancing(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.cursor = 0 // deliberately not on the row being clicked
+
+	fileIdx := -1
+	for i, r := range fp.rows {
+		if !r.isParent {
+			fileIdx = i
+			break
+		}
+	}
+	if fileIdx == -1 {
+		t.Fatal("no non-\"..\" row found")
+	}
+	rowY := fp.AbsY + 1 + (fileIdx - fp.scroll)
+
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventMouseRightDown, MouseX: fp.AbsX + 2, MouseY: rowY})
+
+	if !fp.rows[fileIdx].tagged {
+		t.Error("row should be tagged after a right-click")
+	}
+	if fp.cursor != fileIdx {
+		t.Errorf("cursor = %d after right-click, want %d (moved to the clicked row)", fp.cursor, fileIdx)
+	}
+
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventMouseRightDown, MouseX: fp.AbsX + 2, MouseY: rowY})
+	if fp.rows[fileIdx].tagged {
+		t.Error("a second right-click on the same row should untag it")
+	}
+}
+
+func TestFilePane_RightClickOnParentRowDoesNotTagOrPanic(t *testing.T) {
+	fp, _ := newTestPane(t)
+	rowY := fp.AbsY + 1 // the ".." row
+
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventMouseRightDown, MouseX: fp.AbsX + 2, MouseY: rowY})
+
+	if fp.rows[0].tagged {
+		t.Error("the \"..\" row must never be taggable")
+	}
+}
+
 func TestFilePane_SelectionPathsFallsBackToCursor(t *testing.T) {
 	fp, dir := newTestPane(t)
 	fp.cursor = 1
