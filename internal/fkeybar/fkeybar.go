@@ -67,6 +67,13 @@ type Bar struct {
 	// there — so anything meant to survive on this row has to be part of
 	// this widget, not a separate Application.SetStatus call.
 	Status string
+
+	// OnBeforeDraw, if set, runs at the start of every DrawRelative call,
+	// before Keys is read — for a host program that needs a chip's Text to
+	// track live state with no "changed" event to hook (e.g. which pane
+	// currently has focus), the same per-frame-recompute pattern this
+	// project already uses for its own custom widgets.
+	OnBeforeDraw func()
 }
 
 // New creates a Bar at (x, y) listing keys left to right.
@@ -96,6 +103,9 @@ func (b *Bar) rightEdge() int {
 
 // DrawRelative implements Graphite.Widget.
 func (b *Bar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
+	if b.OnBeforeDraw != nil {
+		b.OnBeforeDraw()
+	}
 	b.BaseWidget.DrawRelative(c, offX, offY, pW, pH)
 	theme := c.Theme()
 
@@ -113,14 +123,20 @@ func (b *Bar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 			break
 		}
 
-		keyBg := k.Role.color(theme)
+		// An implemented key's chip carries its Role color; an
+		// unimplemented one (OnClick == nil) recedes into BgScreen — a
+		// distinctly darker well than the bar's own BgWindow fill, so the
+		// chip's outline stays visible instead of blending into the bar
+		// the way theme.Disabled (close to BgWindow) used to.
+		keyBg, labelFg := k.Role.color(theme), theme.BgScreen
 		textFg := theme.FgWindow
 		if k.OnClick == nil {
-			keyBg = theme.Disabled
+			keyBg = theme.BgScreen
+			labelFg = theme.FgDisabled
 			textFg = theme.FgDisabled
 		}
 
-		c.DrawTextBounded(x, b.AbsY, keyW, " "+k.Label, keyBg, theme.BgScreen)
+		c.DrawTextBounded(x, b.AbsY, keyW, " "+k.Label, keyBg, labelFg)
 		x += keyW
 		c.DrawTextBounded(x, b.AbsY, textW, " "+k.Text, theme.BgWindow, textFg)
 		x += textW + 1
