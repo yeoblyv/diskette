@@ -13,6 +13,7 @@ import (
 
 	"github.com/yeoblyv/diskette/internal/copyengine"
 	"github.com/yeoblyv/diskette/internal/filepane"
+	"github.com/yeoblyv/diskette/internal/theme"
 	"github.com/yeoblyv/diskette/internal/vfs"
 )
 
@@ -26,24 +27,43 @@ func main() {
 	}
 
 	app := Graphite.NewApplication()
+	app.SetTheme(theme.Diskette())
 	win := Graphite.NewWindow(0, 0, " diskette ")
 	win.SetPercentSize(96, 92)
 
 	fs := vfs.LocalFS{}
 
-	left := filepane.New(0, 1, 0, -1, fs, start)
+	left := filepane.New(0, 2, 0, -1, fs, start)
 	left.SetPercentLayout(0, 0, 50, 0)
-	right := filepane.New(0, 1, 0, -1, fs, start)
+	right := filepane.New(0, 2, 0, -1, fs, start)
 	right.SetPercentLayout(50, 0, 50, 0)
 
+	activePane := func() *filepane.FilePane {
+		if right.HasFocus() {
+			return right
+		}
+		return left
+	}
+	otherPane := func(p *filepane.FilePane) *filepane.FilePane {
+		if p == left {
+			return right
+		}
+		return left
+	}
+
 	leftPathBtn := newPathButton(app, left)
+	leftPathBtn.SetPosition(0, 1)
 	rightPathBtn := newPathButton(app, right)
+	rightPathBtn.SetPosition(0, 1)
 	rightPathBtn.SetPercentLayout(50, 0, 0, 0)
 	left.OnPathChanged = func(path string) { setButtonText(leftPathBtn, path) }
 	right.OnPathChanged = func(path string) { setButtonText(rightPathBtn, path) }
 
 	fKeyBar := Graphite.NewLabel(0, -1, fKeyBarText)
 
+	menu := newMenuStrip(app, activePane, otherPane)
+
+	win.AddWidget(menu)
 	win.AddWidget(leftPathBtn)
 	win.AddWidget(rightPathBtn)
 	win.AddWidget(left)
@@ -52,10 +72,7 @@ func main() {
 
 	onFKey := func(source *filepane.FilePane) func(Graphite.KeyCode) {
 		return func(key Graphite.KeyCode) {
-			other := right
-			if source == right {
-				other = left
-			}
+			other := otherPane(source)
 			switch key {
 			case Graphite.KeyF2:
 				doRename(app, source)
@@ -78,6 +95,36 @@ func main() {
 	app.SetOnQuitRequested(func() { requestQuit(app) })
 	app.SetWindow(win)
 	app.Run()
+}
+
+// newMenuStrip builds the top menu bar as a mouse-only duplicate of the
+// F-key actions (per the project's spec, an optional pointer-driven
+// alternative to the F-key bar, not a replacement for it). IsFocusable is
+// forced back to false right after construction, same reasoning as
+// newPathButton: MenuStrip only ever responds to EventMouseDown anyway
+// (see graphite's widgets.go), so it loses no functionality by staying out
+// of the Tab cycle, and the two FilePanes stay the only two top-level
+// focusable widgets in the window.
+func newMenuStrip(app *Graphite.Application, active func() *filepane.FilePane, other func(*filepane.FilePane) *filepane.FilePane) *Graphite.MenuStrip {
+	menu := Graphite.NewMenuStrip([]Graphite.MenuCategory{
+		{Label: "File", Items: []Graphite.MenuItem{
+			{Label: "Rename  F2", Action: func() { doRename(app, active()) }},
+			{Label: "Copy    F5", Action: func() { doCopyOrMove(app, active(), other(active()), false) }},
+			{Label: "Move    F6", Action: func() { doCopyOrMove(app, active(), other(active()), true) }},
+			{Label: "MkDir   F7", Action: func() { doMkdir(app, active()) }},
+			{Label: "Delete  F8", Action: func() { doDelete(app, active()) }},
+		}},
+		{Label: "Help", Items: []Graphite.MenuItem{
+			{Label: "About", Action: func() {
+				app.ShowMessage(" About ", "Diskette — a dual-pane file manager.", Graphite.BtnDefault)
+			}},
+		}},
+		{Label: "Quit", Items: []Graphite.MenuItem{
+			{Label: "Quit    F10", Action: func() { requestQuit(app) }},
+		}},
+	})
+	menu.IsFocusable = false
+	return menu
 }
 
 // requestQuit asks the user to confirm before actually quitting — wired to

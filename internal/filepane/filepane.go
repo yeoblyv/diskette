@@ -496,7 +496,7 @@ func (fp *FilePane) drawRow(c *Graphite.Canvas, y int, l colLayout, r row, isCur
 	case isCursor:
 		bg = c.Theme().BgFocused.Darken(0.6)
 	case r.tagged:
-		fg = c.Theme().Warning
+		fg = c.Theme().Accent
 	case r.IsDir:
 		fg = c.Theme().Success
 	}
