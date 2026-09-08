@@ -1,0 +1,15 @@
+#!/bin/bash
+# Diskette is a terminal UI, so double-clicking the .app (which has no
+# attached terminal of its own) can't run it directly — this wrapper opens
+# Terminal.app and runs the real binary inside it instead. See
+# packaging/README.md for why this only exists on macOS.
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$DIR/diskette-bin"
+
+osascript <<EOF
+tell application "Terminal"
+	activate
+	do script "\"$BIN\""
+end tell
+EOF
