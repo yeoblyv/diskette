@@ -9,12 +9,29 @@ import (
 // SavedTab is a pinned tab's on-disk representation — no live Widget,
 // since a running shell or an open directory listing isn't something to
 // serialize. Path only means anything for a FileList tab (letting it
-// reopen at the same directory); it's ignored for Terminal.
+// reopen at the same directory); it's ignored for Terminal and Remote.
+// Remote is set only for a Remote tab.
 type SavedTab struct {
-	Kind   Kind   `json:"kind"`
-	Name   string `json:"name"`
-	Path   string `json:"path,omitempty"`
-	Pinned bool   `json:"pinned"`
+	Kind   Kind         `json:"kind"`
+	Name   string       `json:"name"`
+	Path   string       `json:"path,omitempty"`
+	Pinned bool         `json:"pinned"`
+	Remote *SavedRemote `json:"remote,omitempty"`
+}
+
+// SavedRemote is a pinned Remote tab's connection metadata — everything
+// needed to pre-fill a reconnect prompt, deliberately nothing needed to
+// reconnect silently: no password, no key passphrase. AuthMethod is a
+// plain string ("password"/"privatekey"/"agent"), not this package's own
+// enum, so internal/tabs doesn't need to depend on internal/sftpfs just
+// to describe which one was chosen; cmd/diskette translates between the
+// two.
+type SavedRemote struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port,omitempty"`
+	Username   string `json:"username"`
+	AuthMethod string `json:"authMethod"`
+	KeyPath    string `json:"keyPath,omitempty"`
 }
 
 // MarshalJSON encodes Kind as its String() form ("filelist"/"terminal")
@@ -32,9 +49,12 @@ func (k *Kind) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return err
 	}
-	if s == "terminal" {
+	switch s {
+	case "terminal":
 		*k = Terminal
-	} else {
+	case "remote":
+		*k = Remote
+	default:
 		*k = FileList
 	}
 	return nil

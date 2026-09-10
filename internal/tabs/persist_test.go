@@ -3,6 +3,7 @@ package tabs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,7 +62,7 @@ func TestLoad_MissingFileReturnsAnError(t *testing.T) {
 }
 
 func TestKind_JSONRoundTrip(t *testing.T) {
-	for _, k := range []Kind{FileList, Terminal} {
+	for _, k := range []Kind{FileList, Terminal, Remote} {
 		data, err := k.MarshalJSON()
 		if err != nil {
 			t.Fatalf("MarshalJSON(%v): %v", k, err)
@@ -76,6 +77,25 @@ func TestKind_JSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestKind_StringNamesEachKind(t *testing.T) {
+	cases := map[Kind]string{FileList: "filelist", Terminal: "terminal", Remote: "remote"}
+	for k, want := range cases {
+		if got := k.String(); got != want {
+			t.Errorf("%v.String() = %q, want %q", k, got, want)
+		}
+	}
+}
+
+func TestKind_UnmarshalRemoteString(t *testing.T) {
+	var k Kind
+	if err := k.UnmarshalJSON([]byte(`"remote"`)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if k != Remote {
+		t.Errorf("k = %v, want Remote", k)
+	}
+}
+
 func TestKind_UnmarshalUnrecognizedStringFallsBackToFileList(t *testing.T) {
 	var k Kind
 	if err := k.UnmarshalJSON([]byte(`"something-new"`)); err != nil {
@@ -83,6 +103,55 @@ func TestKind_UnmarshalUnrecognizedStringFallsBackToFileList(t *testing.T) {
 	}
 	if k != FileList {
 		t.Errorf("k = %v, want FileList as the fallback for an unrecognized kind", k)
+	}
+}
+
+func TestSaveLoad_RoundTripsARemoteTabsConnectionMetadataButNeverASecret(t *testing.T) {
+	withTempConfigHome(t)
+
+	want := SavedState{
+		Left: []SavedTab{
+			{
+				Kind: Remote, Name: "me@example.com", Pinned: true,
+				Remote: &SavedRemote{
+					Host: "example.com", Port: 2222, Username: "me",
+					AuthMethod: "privatekey", KeyPath: "/home/me/.ssh/id_ed25519",
+				},
+			},
+		},
+		LeftActive: 0,
+	}
+
+	if err := Save(want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if len(got.Left) != 1 || got.Left[0].Remote == nil {
+		t.Fatalf("Left = %+v, want one Remote tab with metadata", got.Left)
+	}
+	if *got.Left[0].Remote != *want.Left[0].Remote {
+		t.Errorf("Remote = %+v, want %+v", got.Left[0].Remote, want.Left[0].Remote)
+	}
+
+	// The on-disk file itself must not contain anything secret-shaped —
+	// SavedRemote has no password/passphrase field to begin with, but
+	// this guards against one ever being added without a second thought.
+	path, err := configPath()
+	if err != nil {
+		t.Fatalf("configPath: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading saved file: %v", err)
+	}
+	for _, forbidden := range []string{"password", "passphrase", "Password", "Passphrase"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Errorf("saved tabs.json contains %q — a secret must never be persisted", forbidden)
+		}
 	}
 }
 

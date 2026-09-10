@@ -5,23 +5,35 @@
 // — only which tabs exist and which one is showing.
 package tabs
 
-// Kind identifies what a Tab displays. Diskette has exactly two content
-// types today; a third would extend this, not replace it.
+// Kind identifies what a Tab displays.
 type Kind int
 
-// Supported tab content kinds.
+// Supported tab content kinds. Remote is a FileList backed by a remote
+// vfs.FileSystem (an SFTP session) instead of the local disk — it's its
+// own Kind rather than a flag on FileList because it needs its own
+// persisted connection metadata (see persist.go's SavedTab.Remote) and
+// its own restore behavior (reconnecting needs a password nothing here
+// ever saves, so it can't just reopen a path like a local FileList does).
 const (
 	FileList Kind = iota
 	Terminal
+	Remote
 )
 
 // String names k the way a tab's own label prefix or a saved-state file
-// would want it, and the way SavedTab's JSON encodes it.
+// would want it, and the way SavedTab's JSON encodes it. An unrecognized
+// Kind (there is none today, but a zero-value int outside these three
+// would otherwise silently pass through) names itself the same as
+// FileList, matching UnmarshalJSON's own "never fail on this" policy.
 func (k Kind) String() string {
-	if k == Terminal {
+	switch k {
+	case Terminal:
 		return "terminal"
+	case Remote:
+		return "remote"
+	default:
+		return "filelist"
 	}
-	return "filelist"
 }
 
 // Widget is the minimal shape a tab's live content needs to satisfy —
