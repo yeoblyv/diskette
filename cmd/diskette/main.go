@@ -9,16 +9,19 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	Graphite "github.com/yeoblyv/graphite"
 
 	"github.com/yeoblyv/diskette/internal/assets"
 	"github.com/yeoblyv/diskette/internal/copyengine"
 	"github.com/yeoblyv/diskette/internal/diskspace"
+	"github.com/yeoblyv/diskette/internal/fileinfo"
 	"github.com/yeoblyv/diskette/internal/filepane"
 	"github.com/yeoblyv/diskette/internal/fkeybar"
 	"github.com/yeoblyv/diskette/internal/openwith"
 	"github.com/yeoblyv/diskette/internal/roots"
+	"github.com/yeoblyv/diskette/internal/search"
 	"github.com/yeoblyv/diskette/internal/theme"
 	"github.com/yeoblyv/diskette/internal/vfs"
 )
@@ -121,8 +124,12 @@ func main() {
 		return func(key Graphite.KeyCode) {
 			other := otherPane(source)
 			switch key {
+			case Graphite.KeyF1:
+				showFileInfo(app, source)
 			case Graphite.KeyF2:
 				doRename(app, source)
+			case Graphite.KeyF3:
+				showFindFiles(app, source)
 			case Graphite.KeyF5:
 				doCopyOrMove(app, source, other, false)
 			case Graphite.KeyF6:
@@ -434,20 +441,20 @@ func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache 
 	c.DrawCell(barX+barW, d.AbsY, "]", theme.BgWindow, theme.FgWindow)
 }
 
-// newFKeyBar builds the bottom action bar. F1/F3/F4/F9 are listed with no
+// newFKeyBar builds the bottom action bar. F4/F9 are listed with no
 // OnClick (fkeybar renders those dimmed and inert) since they aren't
-// implemented yet: F3/F4 need Suspend/Resume (a later phase), and F1/F9
-// weren't required by this phase's scope. Showing them dimmed is honest
-// about that instead of quietly leaving them off the bar's layout. Every
-// active key is RolePrimary (the palette's lime accent) except Delete,
-// which is destructive and stays RoleDanger — one accent color for
-// everything, one exception, exactly as specified, not a color per
-// action.
+// implemented yet: F4/Edit needs Suspend/Resume around $EDITOR (a later
+// phase), and F9/Menu wasn't required by this phase's scope. Showing them
+// dimmed is honest about that instead of quietly leaving them off the
+// bar's layout. Every active key is RolePrimary (the palette's lime
+// accent) except Delete, which is destructive and stays RoleDanger — one
+// accent color for everything, one exception, exactly as specified, not a
+// color per action.
 func newFKeyBar(app *Graphite.Application, right *filepane.FilePane, active func() *filepane.FilePane, other func(*filepane.FilePane) *filepane.FilePane) *fkeybar.Bar {
 	bar := fkeybar.New(0, -1, []fkeybar.Key{
-		{Label: "F1", Text: "Help"},
+		{Label: "F1", Text: "Info", OnClick: func() { showFileInfo(app, active()) }},
 		{Label: "F2", Text: "Rename", OnClick: func() { doRename(app, active()) }},
-		{Label: "F3", Text: "View"},
+		{Label: "F3", Text: "Find", OnClick: func() { showFindFiles(app, active()) }},
 		{Label: "F4", Text: "Edit"},
 		{Label: "F5", Text: "Copy Right", OnClick: func() { doCopyOrMove(app, active(), other(active()), false) }},
 		{Label: "F6", Text: "Move Right", OnClick: func() { doCopyOrMove(app, active(), other(active()), true) }},
@@ -486,7 +493,9 @@ func newFKeyBar(app *Graphite.Application, right *filepane.FilePane, active func
 func newMenuStrip(app *Graphite.Application, active func() *filepane.FilePane, other func(*filepane.FilePane) *filepane.FilePane) *Graphite.MenuStrip {
 	menu := Graphite.NewMenuStrip([]Graphite.MenuCategory{
 		{Label: "File", Items: []Graphite.MenuItem{
+			{Label: "File Info     F1", Action: func() { showFileInfo(app, active()) }},
 			{Label: "Rename        F2", Action: func() { doRename(app, active()) }},
+			{Label: "Find          F3", Action: func() { showFindFiles(app, active()) }},
 			{Label: "Copy          F5", Action: func() { doCopyOrMove(app, active(), other(active()), false) }},
 			{Label: "Move          F6", Action: func() { doCopyOrMove(app, active(), other(active()), true) }},
 			{Label: "New Folder    F7", Action: func() { doMkdir(app, active()) }},
@@ -538,12 +547,12 @@ func showAbout(app *Graphite.Application) {
 	}
 
 	info := Graphite.NewLabel(40, 2,
-		"Diskette\n\n"+
+		"Diskette v.0.1.0\n\n"+
 			"A cross-platform dual-pane file manager,\n"+
-			"in the style of Total Commander / Midnight\n"+
-			"Commander, built on the graphite TUI\n"+
-			"framework.\n\n"+
-			"Author: Yehor Oblyvantsov\n"+
+			"with FTP, SFTP and SCP support.\n"+
+			"Provides archiving features and build with\n"+
+			"lightweight Graphite TUI framework.\n\n"+
+			"Copyright © 2026 Yehor Oblyvantsov\n"+
 			"github.com/yeoblyv/diskette\n\n"+
 			"Development build.")
 	info.Width = 44
@@ -554,6 +563,161 @@ func showAbout(app *Graphite.Application) {
 	}))
 
 	app.SetModal(mod)
+}
+
+// showFileInfo implements F1: full metadata (size, permissions, modified/
+// accessed/created) for a single selected entry, or just a count and
+// total size when more than one is tagged — the same "detail vs. summary"
+// split TaggedSummary/SelectionPaths already establish for F5/F6/F8.
+func showFileInfo(app *Graphite.Application, fp *filepane.FilePane) {
+	paths := fp.SelectionPaths()
+	if len(paths) == 0 {
+		return // the cursor is on ".." — nothing to report on
+	}
+
+	if len(paths) > 1 {
+		count, size, _ := fp.TaggedSummary()
+		mod := Graphite.NewWindow(44, 10, " File Info ")
+		mod.AddWidget(Graphite.NewLabel(2, 1, fmt.Sprintf(
+			"%d items selected\n\nTotal size: %s", count, formatBytes(uint64(size)))))
+		mod.AddWidget(Graphite.NewButton(2, -2, "Close", Graphite.BtnDefault, func() {
+			app.CloseModal()
+		}))
+		app.SetModal(mod)
+		return
+	}
+
+	info, err := fileinfo.Stat(paths[0])
+	if err != nil {
+		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		return
+	}
+
+	kind := "File"
+	sizeStr := formatBytes(uint64(info.Size))
+	if info.IsDir {
+		kind, sizeStr = "Directory", "—"
+	}
+	created := "not available on this filesystem"
+	if info.CreatedKnown {
+		created = info.Created.Format("02.01.2006 15:04:05")
+	}
+
+	const layout = "02.01.2006 15:04:05"
+	text := fmt.Sprintf(
+		"Name:        %s\nType:        %s\nSize:        %s\nPermissions: %s\n\nModified:    %s\nAccessed:    %s\nCreated:     %s",
+		info.Name, kind, sizeStr, info.Mode.String(),
+		info.Modified.Format(layout), info.Accessed.Format(layout), created)
+
+	mod := Graphite.NewWindow(56, 15, " File Info ")
+	mod.AddWidget(Graphite.NewLabel(2, 1, text))
+	mod.AddWidget(Graphite.NewButton(2, -2, "Close", Graphite.BtnDefault, func() {
+		app.CloseModal()
+	}))
+	app.SetModal(mod)
+}
+
+// showFindFiles implements F3: a criteria modal (search root, name mask,
+// recurse/case-sensitive toggles) that hands off to runFileSearch once
+// submitted.
+func showFindFiles(app *Graphite.Application, fp *filepane.FilePane) {
+	mod := Graphite.NewWindow(60, 14, " Find Files ")
+
+	rootInput := Graphite.NewInputBox(2, 1, 54, "Search in: ")
+	rootInput.Value = fp.Path()
+	mod.AddWidget(rootInput)
+
+	maskInput := Graphite.NewInputBox(2, 3, 54, "Name mask: ")
+	maskInput.Value = "*"
+	mod.AddWidget(maskInput)
+
+	recurseBox := Graphite.NewCheckbox(2, 5, "Search subfolders", true)
+	mod.AddWidget(recurseBox)
+	caseBox := Graphite.NewCheckbox(2, 6, "Case sensitive", false)
+	mod.AddWidget(caseBox)
+
+	mod.AddWidget(Graphite.NewButton(2, -2, "Search", Graphite.BtnSuccess, func() {
+		app.CloseModal()
+		runFileSearch(app, fp, search.Options{
+			Mask:          maskInput.Value,
+			Recursive:     recurseBox.Checked,
+			CaseSensitive: caseBox.Checked,
+		}, rootInput.Value)
+	}))
+	mod.AddWidget(Graphite.NewButton(14, -2, "Cancel", Graphite.BtnDefault, func() {
+		app.CloseModal()
+	}))
+
+	app.SetModal(mod)
+}
+
+// runFileSearch runs opts against root in the background (so a large tree
+// doesn't freeze the UI) and shows results as they arrive in a live-
+// updating list; selecting one navigates fp there and hands the match to
+// FilePane.SetFound, so it reads as a search result rather than an
+// ordinary cursor move.
+func runFileSearch(app *Graphite.Application, fp *filepane.FilePane, opts search.Options, root string) {
+	mod := Graphite.NewWindow(64, 20, " Find Files ")
+	status := Graphite.NewLabel(2, 1, "Searching…")
+	mod.AddWidget(status)
+
+	results := Graphite.NewListBox(2, 3, -4, -4, nil, func(_ int, path string) {
+		app.CloseModal()
+		dir, ok := fp.FS.Parent(path)
+		if !ok {
+			return
+		}
+		name := path[len(dir):]
+		name = trimLeadingSeparators(name)
+		fp.SetPath(dir)
+		fp.SetFound(name)
+	})
+	mod.AddWidget(results)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
+		cancel()
+		app.CloseModal()
+	}))
+	app.SetModal(mod)
+
+	go func() {
+		var matches []string
+		lastUpdate := time.Now()
+		flush := func(done bool) {
+			snapshot := append([]string(nil), matches...)
+			app.Invoke(func() {
+				results.Items = snapshot
+				if done {
+					status.SetText(fmt.Sprintf("%d found", len(snapshot)))
+				} else {
+					status.SetText(fmt.Sprintf("Searching… %d found", len(snapshot)))
+				}
+			})
+		}
+
+		err := search.Run(ctx, fp.FS, root, opts, func(m search.Match) {
+			matches = append(matches, m.Path)
+			if time.Since(lastUpdate) > 150*time.Millisecond {
+				flush(false)
+				lastUpdate = time.Now()
+			}
+		})
+		flush(true)
+		if err != nil && ctx.Err() == nil {
+			app.Invoke(func() { app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger) })
+		}
+	}()
+}
+
+// trimLeadingSeparators strips leading path separators, for turning the
+// suffix left after slicing a parent directory's length off a full path
+// into a bare entry name regardless of platform separator.
+func trimLeadingSeparators(s string) string {
+	for len(s) > 0 && (s[0] == '/' || s[0] == '\\') {
+		s = s[1:]
+	}
+	return s
 }
 
 // pathBar is the clickable current-path strip in newNavRow: it reads fp's
