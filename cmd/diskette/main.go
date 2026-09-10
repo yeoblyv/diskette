@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -180,6 +182,8 @@ func runTUI() {
 				doRename(app, fp)
 			case Graphite.KeyF3:
 				showFindFiles(app, fp)
+			case Graphite.KeyF4:
+				doEdit(app, fp)
 			case Graphite.KeyF5:
 				if dst, ok := otherGroup(activeGroup()).ActiveFilePane(); ok {
 					doCopyOrMove(app, fp, dst, false)
@@ -1196,13 +1200,12 @@ func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache 
 	c.DrawCell(barX+barW, d.AbsY, "]", theme.BgWindow, theme.FgWindow)
 }
 
-// newFKeyBar builds the bottom action bar. F4/F9 are listed with no
-// OnClick (fkeybar renders those dimmed and inert) since they aren't
-// implemented yet: F4/Edit needs Suspend/Resume around $EDITOR (a later
-// phase), and F9/Menu wasn't required by this phase's scope. Showing them
-// dimmed is honest about that instead of quietly leaving them off the
-// bar's layout. Every active key is RolePrimary (the palette's lime
-// accent) except Delete, which is destructive and stays RoleDanger.
+// newFKeyBar builds the bottom action bar. F9 is listed with no OnClick
+// (fkeybar renders it dimmed and inert) since Menu wasn't required by an
+// earlier phase's scope — showing it dimmed is honest about that instead
+// of quietly leaving it off the bar's layout. Every active key is
+// RolePrimary (the palette's lime accent) except Delete, which is
+// destructive and stays RoleDanger.
 // withFP/withPanes are the same active-FileList guards main() builds for
 // the menu, reused here so F1/F2/F3/F7/F8 (and F5/F6's dst lookup) all
 // share one no-op-on-a-Terminal-tab behavior.
@@ -1211,7 +1214,7 @@ func newFKeyBar(app *Graphite.Application, right *paneTabs, withFP func(func(*fi
 		{Label: "F1", Text: "Info", OnClick: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
 		{Label: "F2", Text: "Rename", OnClick: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
 		{Label: "F3", Text: "Find", OnClick: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
-		{Label: "F4", Text: "Edit"},
+		{Label: "F4", Text: "Edit", OnClick: withFP(func(fp *filepane.FilePane) { doEdit(app, fp) })},
 		{Label: "F5", Text: "Copy Right", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
 		{Label: "F6", Text: "Move Right", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
 		{Label: "F7", Text: "MkDir", OnClick: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
@@ -1247,6 +1250,7 @@ func newMenuStrip(app *Graphite.Application, left, right *paneTabs, active func(
 			{Label: "File Info     F1", Action: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
 			{Label: "Rename        F2", Action: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
 			{Label: "Find          F3", Action: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
+			{Label: "Edit          F4", Action: withFP(func(fp *filepane.FilePane) { doEdit(app, fp) })},
 			{Label: "Copy          F5", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
 			{Label: "Move          F6", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
 			{Label: "New Folder    F7", Action: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
@@ -1633,6 +1637,132 @@ func promptChooseRoot(app *Graphite.Application, fp *filepane.FilePane) {
 		app.CloseModal()
 	}))
 	app.SetModal(mod)
+}
+
+// doEdit implements F4: opens the entry under the cursor in $VISUAL/
+// $EDITOR (falling back to a sensible per-OS default), suspending
+// diskette's own TUI rendering for the duration exactly like a shell
+// would before running an interactive program — see Graphite.Application's
+// own Suspend/Resume, built for exactly this and unused until now. A
+// local file is edited in place; a remote one (SFTP/FTP) has no path an
+// external editor could open directly, so it's downloaded to a temp file
+// first and re-uploaded once the editor exits.
+func doEdit(app *Graphite.Application, fp *filepane.FilePane) {
+	entry, ok := fp.Selected()
+	if !ok || entry.IsDir {
+		return
+	}
+	path := fp.FS.Join(fp.Path(), entry.Name)
+
+	if _, isLocal := fp.FS.(vfs.LocalFS); isLocal {
+		if runEditor(app, path) {
+			fp.Reload()
+		}
+		return
+	}
+	editRemoteFile(app, fp, path, entry.Name)
+}
+
+// editRemoteFile downloads path to a local temp file (its name keeps
+// name's own extension, so the editor's syntax highlighting still works),
+// edits it, and re-uploads it unconditionally once the editor exits —
+// reliably detecting "was this actually changed" across arbitrary
+// editors (some rewrite in place, some atomically swap in a new file)
+// isn't worth the fragility, and re-uploading identical content is
+// harmless.
+func editRemoteFile(app *Graphite.Application, fp *filepane.FilePane, path, name string) {
+	ctx := context.Background()
+	r, err := fp.FS.Open(ctx, path)
+	if err != nil {
+		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		return
+	}
+	tmp, err := os.CreateTemp("", "diskette-edit-*-"+name)
+	if err != nil {
+		r.Close()
+		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		return
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	_, copyErr := io.Copy(tmp, r)
+	r.Close()
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		app.ShowMessage(" Error ", copyErr.Error(), Graphite.BtnDanger)
+		return
+	}
+	if closeErr != nil {
+		app.ShowMessage(" Error ", closeErr.Error(), Graphite.BtnDanger)
+		return
+	}
+
+	if !runEditor(app, tmpPath) {
+		return // the editor itself never started; nothing to upload
+	}
+
+	local, err := os.Open(tmpPath)
+	if err != nil {
+		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		return
+	}
+	defer local.Close()
+	w, err := fp.FS.Create(ctx, path)
+	if err != nil {
+		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		return
+	}
+	if _, err := io.Copy(w, local); err != nil {
+		w.Close()
+		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		return
+	}
+	if err := w.Close(); err != nil {
+		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		return
+	}
+	fp.Reload()
+}
+
+// runEditor suspends diskette's own terminal rendering, runs the user's
+// editor on path with the real terminal handed to it directly, and
+// resumes afterward. Reports false (with an error already shown) only if
+// the editor failed to even start — a nonzero exit once it's running
+// isn't treated as fatal, since some editors exit nonzero for reasons
+// unrelated to whether the file was actually saved.
+func runEditor(app *Graphite.Application, path string) bool {
+	argv := editorCommand()
+	cmd := exec.Command(argv[0], append(argv[1:], path)...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+
+	app.Suspend()
+	defer app.Resume()
+
+	if err := cmd.Run(); err != nil {
+		if _, ranAtLeast := err.(*exec.ExitError); !ranAtLeast {
+			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+			return false
+		}
+	}
+	return true
+}
+
+// editorCommand returns the editor to launch, split on whitespace so a
+// $VISUAL/$EDITOR like "code -w" or "vim -u NONE" carries its own flags —
+// $VISUAL first, then $EDITOR (the conventional precedence for a
+// terminal-attached editor over a possibly-GUI one), falling back to a
+// per-OS default when neither is set.
+func editorCommand() []string {
+	for _, envVar := range []string{"VISUAL", "EDITOR"} {
+		if v := strings.TrimSpace(os.Getenv(envVar)); v != "" {
+			return strings.Fields(v)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return []string{"notepad"}
+	}
+	return []string{"vi"}
 }
 
 // doRename implements F2: rename the entry under the cursor.
