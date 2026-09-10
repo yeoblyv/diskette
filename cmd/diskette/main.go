@@ -1251,15 +1251,19 @@ func newMenuStrip(app *Graphite.Application, left, right *paneTabs, active func(
 						app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
 					}
 				}},
-				{Label: "Connect to server...", Action: func() {
-					showConnectDialog(app, active(), nil, nil)
-				}},
 			}},
 			{Separator: true},
 			{Label: "Pin/Unpin Tab", Action: func() { active().group.TogglePin(active().group.Active) }},
 			{Label: "Close Tab", Action: func() { active().CloseTabAt(active().group.Active) }},
 			{Separator: true},
 			{Label: "Manage Tabs...", Action: func() { showManageTabs(app, left, right) }},
+		}},
+		{Label: "Network", Items: []Graphite.MenuItem{
+			{Label: "Create Connection...", Action: func() {
+				showConnectDialog(app, active(), nil, "/", nil)
+			}},
+			{Label: "Reconnect", Action: func() { doReconnect(app, active()) }},
+			{Label: "Disconnect", Action: func() { doDisconnect(app, active()) }},
 		}},
 		{Label: "Help", Items: []Graphite.MenuItem{
 			{Label: "About", Action: func() { showAbout(app) }},
@@ -1996,7 +2000,7 @@ func restoreSide(p *paneTabs, saved []tabs.SavedTab, active int, start string) {
 			}
 			pendingRemotes++
 			meta, name := *st.Remote, st.Name
-			showConnectDialog(p.app, p, &meta, func() {
+			showConnectDialog(p.app, p, &meta, "/", func() {
 				p.group.Tabs[len(p.group.Tabs)-1].Pinned = true
 				p.group.Tabs[len(p.group.Tabs)-1].Name = name
 			})

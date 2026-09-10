@@ -82,15 +82,17 @@ func guessKeyPath() string {
 }
 
 // showConnectDialog opens the "Connect to server" modal, which on a
-// successful connection adds a Remote tab to target via AddRemote. If
-// prefill is non-nil, every field except the secret (password/passphrase,
-// which is never saved) is pre-populated from it, including which
-// protocol section is shown — used to reconnect a pinned Remote tab on
-// restart (see restoreSide in main.go) — and onConnected, if non-nil,
-// runs right after AddRemote succeeds so the caller can mark the new tab
-// pinned/renamed to match what was restored (AddRemote itself has no way
-// to know this is a restore rather than a fresh connection).
-func showConnectDialog(app *Graphite.Application, target *paneTabs, prefill *tabs.SavedRemote, onConnected func()) {
+// successful connection adds a Remote tab to target via AddRemote, opened
+// at startPath (use "/" for a fresh connection; doReconnect passes the
+// path the old session was showing, so reconnecting doesn't lose your
+// place). If prefill is non-nil, every field except the secret
+// (password/passphrase, which is never saved) is pre-populated from it,
+// including which protocol section is shown — used both by
+// restoreSide (restarting into a pinned Remote tab) and doReconnect — and
+// onConnected, if non-nil, runs right after AddRemote succeeds so the
+// caller can mark the new tab pinned/renamed/positioned to match
+// whatever it's replacing (AddRemote itself has no way to know that).
+func showConnectDialog(app *Graphite.Application, target *paneTabs, prefill *tabs.SavedRemote, startPath string, onConnected func()) {
 	mod := Graphite.NewWindow(60, 30, " Connect to server ")
 
 	protocolRow := Graphite.NewFlex(2, 1, 54, 1, Graphite.FlexRow)
@@ -235,9 +237,9 @@ func showConnectDialog(app *Graphite.Application, target *paneTabs, prefill *tab
 			return
 		}
 		if protocolCombo.Selected == 1 {
-			connectFTPFromDialog(app, target, ftpHostBox, ftpPortBox, ftpUserBox, ftpPasswordBox, securityCombo, &connecting, onConnected)
+			connectFTPFromDialog(app, target, startPath, ftpHostBox, ftpPortBox, ftpUserBox, ftpPasswordBox, securityCombo, &connecting, onConnected)
 		} else {
-			connectSFTPFromDialog(app, target, sftpHostBox, sftpPortBox, sftpUserBox, authCombo, keyPathBox, passphraseBox, passwordBox, &connecting, onConnected)
+			connectSFTPFromDialog(app, target, startPath, sftpHostBox, sftpPortBox, sftpUserBox, authCombo, keyPathBox, passphraseBox, passwordBox, &connecting, onConnected)
 		}
 	}
 
@@ -286,7 +288,7 @@ func parsePort(app *Graphite.Application, box *Graphite.InputBox, def int) (port
 // connectSFTPFromDialog reads the SFTP section's fields, validates them,
 // and starts the SFTP connect+host-key flow — the dialog-facing half of
 // what connectRemote/verifyAndDial used to do inline.
-func connectSFTPFromDialog(app *Graphite.Application, target *paneTabs, hostBox, portBox, userBox *Graphite.InputBox, authCombo *Graphite.ComboBox, keyPathBox, passphraseBox, passwordBox *Graphite.InputBox, connecting *bool, onConnected func()) {
+func connectSFTPFromDialog(app *Graphite.Application, target *paneTabs, startPath string, hostBox, portBox, userBox *Graphite.InputBox, authCombo *Graphite.ComboBox, keyPathBox, passphraseBox, passwordBox *Graphite.InputBox, connecting *bool, onConnected func()) {
 	port, ok := parsePort(app, portBox, 22)
 	if !ok {
 		return
@@ -312,11 +314,11 @@ func connectSFTPFromDialog(app *Graphite.Application, target *paneTabs, hostBox,
 	}
 
 	*connecting = true
-	connectSFTP(app, target, cfg, meta, func() { *connecting = false }, onConnected)
+	connectSFTP(app, target, startPath, cfg, meta, func() { *connecting = false }, onConnected)
 }
 
 // connectFTPFromDialog is connectSFTPFromDialog's FTP counterpart.
-func connectFTPFromDialog(app *Graphite.Application, target *paneTabs, hostBox, portBox, userBox, passwordBox *Graphite.InputBox, securityCombo *Graphite.ComboBox, connecting *bool, onConnected func()) {
+func connectFTPFromDialog(app *Graphite.Application, target *paneTabs, startPath string, hostBox, portBox, userBox, passwordBox *Graphite.InputBox, securityCombo *Graphite.ComboBox, connecting *bool, onConnected func()) {
 	port, ok := parsePort(app, portBox, 21)
 	if !ok {
 		return
@@ -340,7 +342,7 @@ func connectFTPFromDialog(app *Graphite.Application, target *paneTabs, hostBox, 
 	}
 
 	*connecting = true
-	connectFTP(app, target, cfg, meta, func() { *connecting = false }, onConnected)
+	connectFTP(app, target, startPath, cfg, meta, func() { *connecting = false }, onConnected)
 }
 
 // connectSFTP does the actual SFTP dialing on a background goroutine —
@@ -350,7 +352,7 @@ func connectFTPFromDialog(app *Graphite.Application, target *paneTabs, hostBox, 
 // or failure). done runs when the attempt finishes either way (clearing
 // showConnectDialog's re-entrancy guard); onConnected, if non-nil, runs
 // only after a successful AddRemote.
-func connectSFTP(app *Graphite.Application, target *paneTabs, cfg sftpfs.Config, meta tabs.SavedRemote, done func(), onConnected func()) {
+func connectSFTP(app *Graphite.Application, target *paneTabs, startPath string, cfg sftpfs.Config, meta tabs.SavedRemote, done func(), onConnected func()) {
 	go func() {
 		defer app.Invoke(done)
 
@@ -382,7 +384,7 @@ func connectSFTP(app *Graphite.Application, target *paneTabs, cfg sftpfs.Config,
 			}
 			app.CloseModal() // the connect dialog
 			label := cfg.Username + "@" + cfg.Host
-			target.AddRemote(fs, "/", label, meta)
+			target.AddRemote(fs, startPath, label, meta)
 			if onConnected != nil {
 				onConnected()
 			}
@@ -395,7 +397,7 @@ func connectSFTP(app *Graphite.Application, target *paneTabs, cfg sftpfs.Config,
 // the standard system trust store with no equivalent trust-on-first-use
 // prompt, so an untrusted/self-signed certificate just surfaces as a
 // plain connect error.
-func connectFTP(app *Graphite.Application, target *paneTabs, cfg ftpfs.Config, meta tabs.SavedRemote, done func(), onConnected func()) {
+func connectFTP(app *Graphite.Application, target *paneTabs, startPath string, cfg ftpfs.Config, meta tabs.SavedRemote, done func(), onConnected func()) {
 	go func() {
 		defer app.Invoke(done)
 
@@ -407,7 +409,7 @@ func connectFTP(app *Graphite.Application, target *paneTabs, cfg ftpfs.Config, m
 			}
 			app.CloseModal() // the connect dialog
 			label := cfg.Username + "@" + cfg.Host
-			target.AddRemote(fs, "/", label, meta)
+			target.AddRemote(fs, startPath, label, meta)
 			if onConnected != nil {
 				onConnected()
 			}
@@ -445,4 +447,63 @@ func showHostKeyConfirm(app *Graphite.Application, hostname string, key ssh.Publ
 		respond(false)
 	}))
 	app.SetModal(mod)
+}
+
+// doReconnect implements the Network menu's "Reconnect": re-opens the
+// Connect dialog pre-filled from the active tab's own connection
+// metadata, at the same path it was showing, without touching the old
+// connection until a new one is actually established. Canceling the
+// dialog leaves the original tab exactly as it was — nothing is closed
+// or removed up front, only once AddRemote has already added its
+// replacement, so there's no window where the pane is left with a dead
+// connection or (on a pane's only tab) no tab at all.
+func doReconnect(app *Graphite.Application, p *paneTabs) {
+	idx := p.group.Active
+	content, ok := p.contentAt(idx)
+	if !ok || content.remote == nil {
+		app.ShowMessage(" Error ", "The active tab isn't connected to a server.", Graphite.BtnDanger)
+		return
+	}
+
+	meta := content.remote.meta
+	oldFS := content.remote.fs
+	pinned := p.group.Tabs[idx].Pinned
+	name := p.group.Tabs[idx].Name
+	startPath := content.filePane.Path()
+
+	showConnectDialog(app, p, &meta, startPath, func() {
+		newIdx := p.group.Active
+		p.group.Tabs[newIdx].Pinned = pinned
+		p.group.Tabs[newIdx].Name = name
+		oldFS.Close()
+		// idx is still valid here: AddRemote only ever appends, so the
+		// old tab hasn't moved, and there are now at least two tabs
+		// (the old one plus the new one just added), so removing it is
+		// never refused as "a pane's last tab."
+		p.group.Close(idx)
+	})
+}
+
+// doDisconnect implements the Network menu's "Disconnect": closes the
+// active tab's connection. If other tabs remain on the pane, this is
+// exactly CloseTabAt on the active tab; if it's the pane's only tab (which
+// CloseTabAt refuses to close, since a pane must always show something),
+// the connection is closed and the tab replaced with a local listing at
+// the process's own working directory instead of leaving the pane with
+// nothing open.
+func doDisconnect(app *Graphite.Application, p *paneTabs) {
+	idx := p.group.Active
+	content, ok := p.contentAt(idx)
+	if !ok || content.remote == nil {
+		app.ShowMessage(" Error ", "The active tab isn't connected to a server.", Graphite.BtnDanger)
+		return
+	}
+
+	if len(p.group.Tabs) > 1 {
+		p.CloseTabAt(idx)
+		return
+	}
+	content.remote.fs.Close()
+	p.AddFileList(mustGetwd())
+	p.group.Close(idx) // safe now: AddFileList just added a second tab
 }
