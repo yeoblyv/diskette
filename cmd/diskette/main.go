@@ -313,16 +313,126 @@ func newTerminalContent(app *Graphite.Application, ipcAddr string) (tabContent, 
 
 	os.Setenv("DISKETTE_IPC", ipcAddr)
 	os.Setenv("DISKETTE_TERMINAL_ID", id)
-	os.Setenv("DISKETTE_SHELL_KIND", shellKindOf(shell))
+	kind := shellKindOf(shell)
+	os.Setenv("DISKETTE_SHELL_KIND", kind)
 	if shimDir, err := cliShimDir(); err == nil {
 		os.Setenv("PATH", pathWithSelfDir(os.Getenv("PATH"), shimDir))
 	}
+	args := configureAutoSync(kind)
 
-	term, err := Graphite.NewTerminal(app, 0, 0, 0, 0, shell, nil)
+	term, err := Graphite.NewTerminal(app, 0, 0, 0, 0, shell, args)
 	if err != nil {
 		return tabContent{}, err
 	}
 	return tabContent{terminal: term, display: term, id: id}, nil
+}
+
+// configureAutoSync makes a fresh Terminal tab sync live from the moment
+// it opens, with no `eval "$(diskette sync on)"` for the user to remember
+// to type themselves. An earlier version of this ran that eval in a
+// throwaway `shell -c '...'` and then `exec`'d a real interactive shell
+// in its place — which doesn't work: exec replaces the whole running
+// process image, and a shell's functions and hook arrays (chpwd_functions
+// and friends) live in that image, not in the environment, so they don't
+// survive the swap. The hook only sticks if it's installed as part of the
+// same shell process the user ends up typing into, which means hooking
+// into that shell's own startup-file mechanism instead:
+//
+//   - zsh: point ZDOTDIR at a directory holding only a .zshenv that
+//     restores the real ZDOTDIR before doing anything else — zsh re-reads
+//     $ZDOTDIR before each later startup file (.zprofile/.zshrc/.zlogin),
+//     so those still load from the real location — sources that real
+//     .zshenv if there is one, then installs the hook.
+//   - bash: --rcfile points at a small file that sources the user's own
+//     ~/.bashrc (bash skips its normal rc lookup once --rcfile is given)
+//     before installing the hook.
+//
+// Both shim files are singletons (zshSyncDotDir/bashSyncRCFile), reused
+// by every Terminal tab, so opening several doesn't create one per tab —
+// and, for zsh, so a later tab doesn't capture an already-overridden
+// ZDOTDIR as if it were the user's real one.
+func configureAutoSync(kind string) []string {
+	switch kind {
+	case "zsh":
+		if dir, err := zshSyncDotDir(); err == nil {
+			os.Setenv("ZDOTDIR", dir)
+		}
+		return nil
+	case "bash":
+		if rcfile, err := bashSyncRCFile(); err == nil {
+			return []string{"--rcfile", rcfile, "-i"}
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+// zshSyncShim caches the one .zshenv shim directory this process creates
+// (see zshSyncDotDir), computed from the real ZDOTDIR/HOME before it's
+// ever overridden.
+var zshSyncShim struct {
+	dir string
+	err error
+	set bool
+}
+
+func zshSyncDotDir() (string, error) {
+	if zshSyncShim.set {
+		return zshSyncShim.dir, zshSyncShim.err
+	}
+	zshSyncShim.set = true
+
+	orig := os.Getenv("ZDOTDIR")
+	if orig == "" {
+		orig = os.Getenv("HOME")
+	}
+	dir, err := os.MkdirTemp("", "diskette-zdotdir-*")
+	if err != nil {
+		zshSyncShim.err = err
+		return "", err
+	}
+	content := fmt.Sprintf(
+		"export ZDOTDIR=%q\n[ -f \"$ZDOTDIR/.zshenv\" ] && source \"$ZDOTDIR/.zshenv\"\neval \"$(diskette sync on)\"\n",
+		orig,
+	)
+	if err := os.WriteFile(filepath.Join(dir, ".zshenv"), []byte(content), 0o644); err != nil {
+		os.RemoveAll(dir)
+		zshSyncShim.err = err
+		return "", err
+	}
+	zshSyncShim.dir = dir
+	return dir, nil
+}
+
+// bashSyncShim caches the one --rcfile shim this process creates (see
+// bashSyncRCFile), reused by every bash Terminal tab.
+var bashSyncShim struct {
+	path string
+	err  error
+	set  bool
+}
+
+func bashSyncRCFile() (string, error) {
+	if bashSyncShim.set {
+		return bashSyncShim.path, bashSyncShim.err
+	}
+	bashSyncShim.set = true
+
+	dir, err := os.MkdirTemp("", "diskette-bashrc-*")
+	if err != nil {
+		bashSyncShim.err = err
+		return "", err
+	}
+	const content = "[ -f \"$HOME/.bashrc\" ] && source \"$HOME/.bashrc\"\neval \"$(diskette sync on)\"\n"
+	rcfile := filepath.Join(dir, "rc.sh")
+	if err := os.WriteFile(rcfile, []byte(content), 0o644); err != nil {
+		os.RemoveAll(dir)
+		bashSyncShim.err = err
+		return "", err
+	}
+	bashSyncShim.path = rcfile
+	return rcfile, nil
 }
 
 // cliShimName is what a Terminal tab's shell needs to find on PATH to run
@@ -1083,6 +1193,12 @@ func requestQuit(app *Graphite.Application, left, right *paneTabs) {
 		saveTabs(left, right)
 		if cliShim.dir != "" {
 			os.RemoveAll(cliShim.dir)
+		}
+		if zshSyncShim.dir != "" {
+			os.RemoveAll(zshSyncShim.dir)
+		}
+		if bashSyncShim.path != "" {
+			os.RemoveAll(filepath.Dir(bashSyncShim.path))
 		}
 		app.Quit()
 	})
