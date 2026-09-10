@@ -33,9 +33,13 @@ type Match struct {
 
 // Run walks (or, if !opts.Recursive, simply lists) root on fs, calling
 // onMatch for every entry whose name matches opts.Mask. It respects ctx
-// cancellation, checked between directories the same way vfs.Walk does.
-// A malformed Mask (filepath.Match's ErrBadPattern) is reported as an
-// error rather than silently matching nothing.
+// cancellation. A malformed Mask (filepath.Match's ErrBadPattern) is
+// reported as an error rather than silently matching nothing; root itself
+// being unreadable is too, since the user named it explicitly. A
+// subdirectory encountered while recursing that turns out to be
+// unreadable (permission denied — macOS's own ~/.Trash is a common one —
+// a broken symlink, ...) is skipped instead: one inaccessible branch
+// shouldn't abort a search across the rest of the tree.
 func Run(ctx context.Context, fs vfs.FileSystem, root string, opts Options, onMatch func(Match)) error {
 	mask := opts.Mask
 	if mask == "" {
@@ -79,10 +83,31 @@ func Run(ctx context.Context, fs vfs.FileSystem, root string, opts Options, onMa
 		return nil
 	}
 
-	return vfs.Walk(ctx, fs, root, func(path string, e vfs.Entry) error {
-		if path != root { // never match the search root against its own mask
-			check(path, e)
+	return walk(ctx, fs, root, check)
+}
+
+// walk lists dir, calling check for every entry and recursing into every
+// subdirectory — deliberately not vfs.Walk, whose Stat-then-List on each
+// directory propagates any single directory's error as fatal to the
+// entire traversal, which is the wrong tradeoff for a "search my whole
+// home directory" query where an inaccessible directory or two is
+// unremarkable. Only ctx cancellation stops it early.
+func walk(ctx context.Context, fs vfs.FileSystem, dir string, check func(path string, e vfs.Entry)) error {
+	entries, err := fs.List(ctx, dir)
+	if err != nil {
+		return nil // can't read this directory; skip it, not fatal to the search
+	}
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return nil
-	})
+		path := fs.Join(dir, e.Name)
+		check(path, e)
+		if e.IsDir {
+			if err := walk(ctx, fs, path, check); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

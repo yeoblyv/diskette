@@ -128,6 +128,30 @@ func TestRun_MatchPathIsJoinedCorrectly(t *testing.T) {
 	}
 }
 
+func TestRun_SkipsAnUnreadableSubdirectoryInsteadOfAborting(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses permission checks")
+	}
+	dir := buildTree(t)
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "secret.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) }) // so TempDir cleanup can remove it
+
+	got := runNames(t, dir, Options{Mask: "*.go", Recursive: true, CaseSensitive: true})
+	want := []string{"b.go", "d.go"}
+	if !equal(got, want) {
+		t.Errorf("got %v, want %v (the unreadable \"locked\" directory should be skipped, not fatal)", got, want)
+	}
+}
+
 func TestRun_BadPatternReturnsError(t *testing.T) {
 	dir := buildTree(t)
 	err := Run(context.Background(), vfs.LocalFS{}, dir, Options{Mask: "[", Recursive: false}, func(Match) {})
