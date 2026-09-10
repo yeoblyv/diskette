@@ -11,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	Graphite "github.com/yeoblyv/graphite"
 
+	"github.com/yeoblyv/diskette/internal/archiveengine"
 	"github.com/yeoblyv/diskette/internal/assets"
 	"github.com/yeoblyv/diskette/internal/copyengine"
 	"github.com/yeoblyv/diskette/internal/diskspace"
@@ -814,17 +816,17 @@ func (p *paneTabs) HandleEvent(ev Graphite.Event) {
 }
 
 // newActionGutter builds the fixed-width column between the two panes
-// holding Copy and Move — two buttons, not four: each is a dirButton whose
-// label flips to always name the focused pane as source and the other one
-// as destination, recomputed fresh every frame (there is no "focus
-// changed" event to hook, so drawing fresh is what keeps it honest). A
-// weight-1 spacer above and below the four fixed-size buttons centers
-// them in the gutter's full height instead of leaving them stacked at the
-// top. ZIP/UNZIP is a placeholder: disabled (grayed out, inert) until
-// archive pack/unpack between the two panes is actually implemented.
-// Each button's Width 0 stretches it to the gutter's full width (see
-// dirButton's own DrawRelative for why that requires a custom widget
-// rather than a plain Button).
+// holding Copy, Move, Zip and Unzip — each a dirButton whose label flips
+// to always name the focused pane as source and the other one as
+// destination, recomputed fresh every frame (there is no "focus changed"
+// event to hook, so drawing fresh is what keeps it honest). Zip packs
+// src's selection into a .zip landing in dst's directory; Unzip extracts
+// an archive selected in src into dst's directory (see doZip/doUnzip and
+// internal/archiveengine). A weight-1 spacer above and below the four
+// fixed-size buttons centers them in the gutter's full height instead of
+// leaving them stacked at the top. Each button's Width 0 stretches it to
+// the gutter's full width (see dirButton's own DrawRelative for why that
+// requires a custom widget rather than a plain Button).
 func newActionGutter(app *Graphite.Application, left, right *paneTabs) *Graphite.Flex {
 	gutter := Graphite.NewFlex(0, 0, 15, 0, Graphite.FlexColumn)
 	gutter.Gap = 1
@@ -843,21 +845,34 @@ func newActionGutter(app *Graphite.Application, left, right *paneTabs) *Graphite
 			doCopyOrMove(app, srcFP, dstFP, true)
 		}
 	}), 0)
-	gutter.AddChild(newDirButton(left, right, "Zip", nil), 0)
-	gutter.AddChild(newDirButton(left, right, "Unzip", nil), 0)
+	gutter.AddChild(newDirButton(left, right, "Zip", func(src, dst *paneTabs) {
+		srcFP, ok1 := src.ActiveFilePane()
+		dstFP, ok2 := dst.ActiveFilePane()
+		if ok1 && ok2 {
+			doZip(app, srcFP, dstFP)
+		}
+	}), 0)
+	gutter.AddChild(newDirButton(left, right, "Unzip", func(src, dst *paneTabs) {
+		srcFP, ok1 := src.ActiveFilePane()
+		dstFP, ok2 := dst.ActiveFilePane()
+		if ok1 && ok2 {
+			doUnzip(app, srcFP, dstFP)
+		}
+	}), 0)
 	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
 	return gutter
 }
 
 // dirButton is a gutter button whose label names whichever pane currently
 // has focus as the source and the other one as the destination, recomputed
-// every frame. Copy/Move are wired to onClick; Zip/Unzip pass a nil
-// onClick and render dimmed and inert, the same shape as Copy/Move so the
-// gutter reads as one consistent design, ready to wire up once archiving
-// is implemented. Deliberately not a Graphite.Button: a Button's
-// background only fills the exact width its own text occupies, not
-// whatever extra width a Flex weight hands it, and its Text is a plain
-// field with no per-frame hook for a label that must track live state.
+// every frame. All four gutter buttons (Copy, Move, Zip, Unzip) wire a
+// real onClick; a nil one renders dimmed and inert instead, a fallback
+// this project doesn't currently exercise but keeps available for a
+// future action that isn't always applicable. Deliberately not a
+// Graphite.Button: a Button's background only fills the exact width its
+// own text occupies, not whatever extra width a Flex weight hands it, and
+// its Text is a plain field with no per-frame hook for a label that must
+// track live state.
 type dirButton struct {
 	Graphite.BaseWidget
 	left, right *paneTabs
@@ -916,8 +931,7 @@ func (d *dirButton) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 
 // HandleEvent implements Graphite.Widget: a click runs onClick with
 // srcDst's direction as of this exact click, not whatever it was when the
-// button was constructed. A nil onClick (Zip/Unzip, not implemented yet)
-// makes the button inert.
+// button was constructed. A nil onClick makes the button inert.
 func (d *dirButton) HandleEvent(ev Graphite.Event) {
 	if ev.Type != Graphite.EventMouseDown || d.onClick == nil {
 		return
@@ -1607,6 +1621,119 @@ func doCopyOrMove(app *Graphite.Application, src, dst *filepane.FilePane, move b
 			src.Reload()
 			dst.Reload()
 			if runErr != nil && runErr != copyengine.ErrCanceledByUser && ctx.Err() == nil {
+				app.ShowMessage(" Error ", runErr.Error(), Graphite.BtnDanger)
+			}
+		})
+	}()
+}
+
+// doZip implements the gutter's Zip button: packs src's tagged selection
+// (or the entry under its cursor, matching every other selection-based
+// action — see FilePane.SelectionPaths) into a single .zip file written
+// into dst's directory, the same source-toward-destination direction
+// Copy and Move already use. Prompts for the archive's name first,
+// defaulting to "<name>.zip" for a single-item selection (matching the
+// convention most file managers use) or "Archive.zip" for several, and
+// confirms before overwriting an existing file of that name.
+func doZip(app *Graphite.Application, src, dst *filepane.FilePane) {
+	paths := src.SelectionPaths()
+	if len(paths) == 0 {
+		return
+	}
+
+	defaultName := "Archive.zip"
+	if count, _, _ := src.TaggedSummary(); count == 0 {
+		if e, ok := src.Selected(); ok {
+			defaultName = e.Name + ".zip"
+		}
+	}
+
+	Graphite.ShowTextEditor(app, " Zip ", "Archive name:", defaultName, func(name string) {
+		if name == "" {
+			return
+		}
+		if !strings.HasSuffix(strings.ToLower(name), ".zip") {
+			name += ".zip"
+		}
+		archivePath := dst.FS.Join(dst.Path(), name)
+
+		start := func() {
+			runArchiveTask(app, " Zip ", src, dst, func(ctx context.Context, onProgress archiveengine.ProgressFunc) error {
+				return archiveengine.CreateZip(ctx, src.FS, paths, dst.FS, archivePath, onProgress)
+			})
+		}
+		if _, err := dst.FS.Stat(context.Background(), archivePath); err == nil {
+			Graphite.ShowConfirm(app, " Zip ", name+" already exists. Overwrite?", Graphite.BtnDanger, start)
+			return
+		}
+		start()
+	})
+}
+
+// doUnzip implements the gutter's Unzip button: extracts every archive
+// tagged in src (or the one under its cursor) into dst's directory,
+// auto-detecting each one's format from its extension — see
+// archiveengine.DetectFormat for the full list (.zip, .tar, .tar.gz/
+// .tgz, .tar.bz2/.tbz2/.tbz). Rejects the whole batch up front if
+// anything selected isn't a recognized archive, rather than extracting
+// some and failing partway through on an unrelated file.
+func doUnzip(app *Graphite.Application, src, dst *filepane.FilePane) {
+	paths := src.SelectionPaths()
+	if len(paths) == 0 {
+		return
+	}
+
+	for _, p := range paths {
+		if archiveengine.DetectFormat(p) == archiveengine.FormatUnknown {
+			app.ShowMessage(" Error ", "Not a recognized archive: "+p, Graphite.BtnDanger)
+			return
+		}
+	}
+
+	runArchiveTask(app, " Unzip ", src, dst, func(ctx context.Context, onProgress archiveengine.ProgressFunc) error {
+		for _, p := range paths {
+			if err := archiveengine.ExtractArchive(ctx, src.FS, p, dst.FS, dst.Path(), onProgress); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// runArchiveTask runs fn (CreateZip or a run of ExtractArchive calls) on
+// a background goroutine behind a Cancel-able progress modal, then
+// reloads both panes and reports any error — the same shape
+// doCopyOrMove's own goroutine/modal wiring uses, generalized so Zip and
+// Unzip can share it instead of duplicating it twice more.
+func runArchiveTask(app *Graphite.Application, title string, src, dst *filepane.FilePane, fn func(ctx context.Context, onProgress archiveengine.ProgressFunc) error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	progressLbl := Graphite.NewLabel(2, 2, "")
+	bar := Graphite.NewProgressBar(2, 4, 40, "")
+	mod := Graphite.NewWindow(50, 9, title)
+	mod.AddWidget(progressLbl)
+	mod.AddWidget(bar)
+	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
+		cancel()
+	}))
+	app.SetModal(mod)
+
+	onProgress := func(p archiveengine.Progress) {
+		app.Invoke(func() {
+			progressLbl.SetText(p.CurrentPath)
+			if p.Total > 0 {
+				bar.SetProgress(float32(p.Done) * 100 / float32(p.Total))
+			}
+		})
+	}
+
+	go func() {
+		runErr := fn(ctx, onProgress)
+		app.Invoke(func() {
+			app.CloseModal() // the progress modal
+			src.Reload()
+			dst.Reload()
+			if runErr != nil && ctx.Err() == nil {
 				app.ShowMessage(" Error ", runErr.Error(), Graphite.BtnDanger)
 			}
 		})
