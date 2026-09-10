@@ -314,8 +314,8 @@ func newTerminalContent(app *Graphite.Application, ipcAddr string) (tabContent, 
 	os.Setenv("DISKETTE_IPC", ipcAddr)
 	os.Setenv("DISKETTE_TERMINAL_ID", id)
 	os.Setenv("DISKETTE_SHELL_KIND", shellKindOf(shell))
-	if exe, err := os.Executable(); err == nil {
-		os.Setenv("PATH", pathWithSelfDir(os.Getenv("PATH"), filepath.Dir(exe)))
+	if shimDir, err := cliShimDir(); err == nil {
+		os.Setenv("PATH", pathWithSelfDir(os.Getenv("PATH"), shimDir))
 	}
 
 	term, err := Graphite.NewTerminal(app, 0, 0, 0, 0, shell, nil)
@@ -323,6 +323,80 @@ func newTerminalContent(app *Graphite.Application, ipcAddr string) (tabContent, 
 		return tabContent{}, err
 	}
 	return tabContent{terminal: term, display: term, id: id}, nil
+}
+
+// cliShimName is what a Terminal tab's shell needs to find on PATH to run
+// the view/sync/tag/untag/select commands (cli.go) — the running binary's
+// own name (e.g. "diskette-darwin-arm64", one of dist/'s per-platform
+// names) isn't good enough, since PATH lookup matches by exact filename.
+func cliShimName() string {
+	if runtime.GOOS == "windows" {
+		return "diskette.exe"
+	}
+	return "diskette"
+}
+
+// cliShim caches the one shim directory this process creates (see
+// cliShimDir), so every Terminal tab shares it instead of each spawning
+// its own.
+var cliShim struct {
+	dir string
+	err error
+	set bool
+}
+
+// cliShimDir lazily builds a small directory containing a single file
+// literally named cliShimName() that resolves back to this running
+// binary, so a spawned shell can always find `diskette` on PATH — via a
+// symlink where possible, falling back to a hard link and finally a full
+// copy for filesystems or platforms that support neither (a plain copy
+// still works even though it won't reflect a binary replaced on disk
+// after diskette started, which no shim scheme can do without re-running
+// the parent process anyway).
+func cliShimDir() (string, error) {
+	if cliShim.set {
+		return cliShim.dir, cliShim.err
+	}
+	cliShim.set = true
+
+	exe, err := os.Executable()
+	if err != nil {
+		cliShim.err = err
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+
+	dir, err := os.MkdirTemp("", "diskette-cli-*")
+	if err != nil {
+		cliShim.err = err
+		return "", err
+	}
+	link := filepath.Join(dir, cliShimName())
+
+	if err := os.Symlink(exe, link); err != nil {
+		if err := os.Link(exe, link); err != nil {
+			if err := copyFile(exe, link); err != nil {
+				os.RemoveAll(dir)
+				cliShim.err = err
+				return "", err
+			}
+		}
+	}
+
+	cliShim.dir = dir
+	return dir, nil
+}
+
+// copyFile is cliShimDir's last-resort fallback for a filesystem or
+// platform that allows neither a symlink nor a hard link to exe.
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o755)
 }
 
 // pathWithSelfDir returns path with selfDir prepended, so a shell spawned
@@ -1007,6 +1081,9 @@ func mustGetwd() string {
 func requestQuit(app *Graphite.Application, left, right *paneTabs) {
 	Graphite.ShowConfirm(app, " Quit ", "Quit Diskette?", Graphite.BtnDanger, func() {
 		saveTabs(left, right)
+		if cliShim.dir != "" {
+			os.RemoveAll(cliShim.dir)
+		}
 		app.Quit()
 	})
 }
