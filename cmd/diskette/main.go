@@ -98,7 +98,7 @@ func main() {
 	rightCol.AddChild(rightNav, 0)
 	rightCol.AddChild(right, 1)
 
-	mainRow := Graphite.NewFlex(0, 2, 0, -2, Graphite.FlexRow)
+	mainRow := Graphite.NewFlex(0, 2, 0, -3, Graphite.FlexRow)
 	mainRow.Gap = 1
 	mainRow.AddChild(leftCol, 1)
 	mainRow.AddChild(newActionGutter(app, left, right), 0)
@@ -331,8 +331,12 @@ type diskSpaceBar struct {
 	state func() statusBarState
 }
 
+// newDiskSpaceBar creates the bar at Y=-3: one row above the very bottom
+// (the F-key bar itself, at Y=-1), leaving row -2 blank — the same
+// one-row gap the menu strip and nav row already have between them —
+// instead of the two rows touching directly.
 func newDiskSpaceBar(state func() statusBarState) *diskSpaceBar {
-	return &diskSpaceBar{BaseWidget: Graphite.NewBaseWidget(0, -2, 0, 1), state: state}
+	return &diskSpaceBar{BaseWidget: Graphite.NewBaseWidget(0, -3, 0, 1), state: state}
 }
 
 // formatBytes renders a byte count in the largest binary unit (KiB, MiB,
