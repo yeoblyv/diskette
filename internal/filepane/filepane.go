@@ -233,16 +233,39 @@ func (fp *FilePane) baseName() string {
 	return strings.TrimLeft(strings.TrimPrefix(fp.path, parent), `/\`)
 }
 
-// selectByName moves the cursor to the row named name, if present, without
-// changing the current directory or scrolling further than necessary.
-func (fp *FilePane) selectByName(name string) {
+// selectByName moves the cursor to the row named name, if present,
+// without changing the current directory or scrolling further than
+// necessary, reporting whether it found one.
+func (fp *FilePane) selectByName(name string) bool {
 	for i, r := range fp.rows {
 		if r.Name == name {
 			fp.cursor = i
 			fp.clampScroll()
-			return
+			return true
 		}
 	}
+	return false
+}
+
+// SelectByName is selectByName, exported for a host program's own UI
+// (e.g. `diskette select` reaching in from a terminal tab, per
+// cmd/diskette/ipc.go) to move the cursor to a specific entry by name.
+func (fp *FilePane) SelectByName(name string) bool { return fp.selectByName(name) }
+
+// SetTagByName sets (or clears) the tag on the row named name, if
+// present — the ".." row can never be tagged, matching toggleTagAt's own
+// rule — reporting whether a matching, taggable row was found. Exported
+// for a host program's own UI (e.g. `diskette tag`/`untag` reaching in
+// from a terminal tab) to tag entries by name rather than by cursor
+// position.
+func (fp *FilePane) SetTagByName(name string, tagged bool) bool {
+	for i, r := range fp.rows {
+		if r.Name == name && !r.isParent {
+			fp.rows[i].tagged = tagged
+			return true
+		}
+	}
+	return false
 }
 
 // Back navigates to the previously visited path, if any, pushing the

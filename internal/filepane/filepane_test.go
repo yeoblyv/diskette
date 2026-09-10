@@ -238,6 +238,62 @@ func TestFilePane_NavigatingAwayClearsFoundHighlight(t *testing.T) {
 	}
 }
 
+func TestFilePane_SelectByNameMovesCursor(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.cursor = 0
+
+	if !fp.SelectByName("b.txt") {
+		t.Fatal("SelectByName(\"b.txt\") = false, want true")
+	}
+	entry, ok := fp.Selected()
+	if !ok || entry.Name != "b.txt" {
+		t.Errorf("Selected() = %+v (ok=%v), want b.txt", entry, ok)
+	}
+}
+
+func TestFilePane_SelectByNameUnknownReturnsFalse(t *testing.T) {
+	fp, _ := newTestPane(t)
+	if fp.SelectByName("does-not-exist.txt") {
+		t.Error("SelectByName on an unknown name = true, want false")
+	}
+}
+
+func TestFilePane_SetTagByName(t *testing.T) {
+	fp, _ := newTestPane(t)
+
+	if !fp.SetTagByName("a.txt", true) {
+		t.Fatal("SetTagByName(\"a.txt\", true) = false, want true")
+	}
+	count, _, hasTagged := fp.TaggedSummary()
+	if !hasTagged || count != 1 {
+		t.Errorf("TaggedSummary() = (%d, hasTagged=%v), want (1, true)", count, hasTagged)
+	}
+
+	if !fp.SetTagByName("a.txt", false) {
+		t.Fatal("SetTagByName(\"a.txt\", false) = false, want true")
+	}
+	if _, _, hasTagged := fp.TaggedSummary(); hasTagged {
+		t.Error("still tagged after SetTagByName(..., false)")
+	}
+}
+
+func TestFilePane_SetTagByNameCannotTagTheParentRow(t *testing.T) {
+	fp, _ := newTestPane(t)
+	// The ".." row's Name is the zero value "" (see row{isParent: true} in
+	// navigate) — matching on that is what actually exercises the
+	// !r.isParent guard, rather than just failing to find anything.
+	if fp.SetTagByName("", true) {
+		t.Error("SetTagByName(\"\", true) = true, want false (the \"..\" row must never be taggable)")
+	}
+}
+
+func TestFilePane_SetTagByNameUnknownReturnsFalse(t *testing.T) {
+	fp, _ := newTestPane(t)
+	if fp.SetTagByName("does-not-exist.txt", true) {
+		t.Error("SetTagByName on an unknown name = true, want false")
+	}
+}
+
 func TestFilePane_RightClickTogglesTagWithoutAdvancing(t *testing.T) {
 	fp, _ := newTestPane(t)
 	fp.cursor = 0 // deliberately not on the row being clicked
