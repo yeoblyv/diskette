@@ -1,7 +1,8 @@
 // Package theme holds Diskette's color palette: an anthracite ground with
-// a lime accent (pane focus, cursor), magenta for tags, and amber/orange
-// for warning/danger — distinct from graphite's own DefaultTheme, which is
-// a generic library default rather than Diskette's identity. BgWindow is
+// a lime accent (pane focus, cursor), magenta for tags, blue for a search
+// match, and amber/orange for warning/danger — distinct from graphite's
+// own DefaultTheme, which is a generic library default rather than
+// Diskette's identity. BgWindow is
 // deliberately lighter than BgWidget: the former is the chrome around the
 // two file lists (nav row, F-key bar, disk bar), the latter is the lists
 // themselves, and the two need to read as visually distinct areas rather
@@ -26,5 +27,6 @@ func Diskette() Graphite.Theme {
 		Disabled:   Graphite.Hex("#2A2A2E"),
 		FgDisabled: Graphite.Hex("#87868F"),
 		Accent:     Graphite.Hex("#FF3E9E"),
+		Info:       Graphite.Hex("#4D7CFF"),
 	}
 }

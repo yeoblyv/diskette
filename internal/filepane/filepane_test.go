@@ -164,6 +164,80 @@ func TestFilePane_ToggleTagAndAdvance(t *testing.T) {
 	}
 }
 
+func TestFilePane_SetFoundMovesCursorAndHighlights(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.cursor = 0
+
+	fp.SetFound("b.txt")
+
+	idx := -1
+	for i, r := range fp.rows {
+		if r.Name == "b.txt" {
+			idx = i
+		}
+	}
+	if idx == -1 {
+		t.Fatal("test fixture has no b.txt")
+	}
+	if fp.cursor != idx {
+		t.Errorf("cursor = %d after SetFound, want %d (the found row)", fp.cursor, idx)
+	}
+	if fp.foundName != "b.txt" {
+		t.Errorf("foundName = %q, want b.txt", fp.foundName)
+	}
+}
+
+func TestFilePane_SetFoundOnUnknownNameIsNoOp(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.cursor = 1
+
+	fp.SetFound("does-not-exist.txt")
+
+	if fp.cursor != 1 {
+		t.Errorf("cursor = %d after SetFound on an unknown name, want unchanged 1", fp.cursor)
+	}
+	if fp.foundName != "" {
+		t.Errorf("foundName = %q, want empty for an unknown name", fp.foundName)
+	}
+}
+
+func TestFilePane_ClickOnFoundRowClearsHighlight(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.SetFound("b.txt")
+
+	rowY := fp.AbsY + 1 + (fp.cursor - fp.scroll)
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventMouseDown, MouseX: fp.AbsX + 2, MouseY: rowY})
+
+	if fp.foundName != "" {
+		t.Errorf("foundName = %q after clicking the found row, want cleared", fp.foundName)
+	}
+}
+
+func TestFilePane_ClickOnOtherRowLeavesFoundHighlightAlone(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.SetFound("b.txt")
+
+	// Click the ".." row (always index 0, never the found row here) —
+	// this still moves the cursor there, same as any other click, but
+	// must not clear a found-highlight that belongs to a different row.
+	fp.HandleEvent(Graphite.Event{Type: Graphite.EventMouseDown, MouseX: fp.AbsX + 2, MouseY: fp.AbsY + 1})
+
+	if fp.foundName != "b.txt" {
+		t.Errorf("foundName = %q after clicking a different row, want it to survive unchanged", fp.foundName)
+	}
+}
+
+func TestFilePane_NavigatingAwayClearsFoundHighlight(t *testing.T) {
+	fp, dir := newTestPane(t)
+	fp.SetFound("b.txt")
+
+	fp.SetPath(dir) // re-navigate to the same directory
+
+	if fp.foundName != "" {
+		t.Errorf("foundName = %q after SetPath, want cleared", fp.foundName)
+	}
+}
+
 func TestFilePane_RightClickTogglesTagWithoutAdvancing(t *testing.T) {
 	fp, _ := newTestPane(t)
 	fp.cursor = 0 // deliberately not on the row being clicked

@@ -71,6 +71,15 @@ type FilePane struct {
 	searchBuf    string
 	lastSearchAt time.Time
 
+	// foundName, if non-empty, names the row a search jumped to — drawn
+	// with a highlight distinct from the cursor and from a tag (see
+	// drawRow), separately from the user's own selection. A click on that
+	// row clears it (see HandleEvent) rather than requiring a dedicated
+	// "dismiss" action; navigating anywhere else clears it too (see
+	// navigate), since it names an entry in a listing that's about to
+	// change out from under it.
+	foundName string
+
 	// OnPathChanged, if set, is called after every successful navigation
 	// (SetPath, Back/Forward/Up, or Enter on a directory row) with the
 	// pane's new path — the host program uses it to keep a window title
@@ -167,6 +176,7 @@ func (fp *FilePane) navigate(dir string, addToHistory bool) bool {
 	}
 
 	fp.path = dir
+	fp.foundName = ""
 	fp.rows = fp.rows[:0]
 	if _, ok := fp.FS.Parent(dir); ok {
 		fp.rows = append(fp.rows, row{isParent: true})
@@ -259,6 +269,22 @@ func (fp *FilePane) CanGoBack() bool { return len(fp.backStack) > 0 }
 
 // CanGoForward reports whether Forward would navigate anywhere.
 func (fp *FilePane) CanGoForward() bool { return len(fp.forwardStack) > 0 }
+
+// SetFound highlights the row named name (see drawRow) and moves the
+// cursor to it, scrolling it into view — the host program calls this
+// right after SetPath navigates into the directory a search result lives
+// in, so the match is both visible and visually distinguished from the
+// user's own cursor/tag state. A no-op if no row has that name.
+func (fp *FilePane) SetFound(name string) {
+	for i, r := range fp.rows {
+		if !r.isParent && r.Name == name {
+			fp.cursor = i
+			fp.foundName = name
+			fp.clampScroll()
+			return
+		}
+	}
+}
 
 // ToggleTag flips the tag on the cursor row and advances the cursor,
 // exactly like pressing Insert — exported so a host program's own UI (a
@@ -503,6 +529,9 @@ func (fp *FilePane) HandleEvent(ev Graphite.Event) {
 		}
 		idx := fp.scroll + relY - 1
 		if idx >= 0 && idx < len(fp.rows) {
+			if ev.Type == Graphite.EventMouseDown && fp.foundName != "" && fp.rows[idx].Name == fp.foundName {
+				fp.foundName = ""
+			}
 			fp.cursor = idx
 			fp.clampScroll()
 
@@ -855,6 +884,12 @@ func (fp *FilePane) statusLine() string {
 func (fp *FilePane) drawRow(c *Graphite.Canvas, y int, l colLayout, r row, isCursor bool) {
 	bg, fg := c.Theme().BgWidget, c.Theme().FgWindow
 	switch {
+	case fp.foundName != "" && r.Name == fp.foundName:
+		// Takes precedence even over the cursor: SetFound also moves the
+		// cursor onto this row, and the whole point of a distinct
+		// found-highlight is that it reads as "a search result," not as
+		// the ordinary cursor, right from the frame it lands on.
+		bg, fg = c.Theme().Info, c.Theme().Info.ContrastText()
 	case isCursor && fp.IsFocused:
 		bg, fg = c.Theme().Primary, c.Theme().FgFocused
 	case isCursor:
