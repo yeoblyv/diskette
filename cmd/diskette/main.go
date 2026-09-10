@@ -314,12 +314,33 @@ func newTerminalContent(app *Graphite.Application, ipcAddr string) (tabContent, 
 	os.Setenv("DISKETTE_IPC", ipcAddr)
 	os.Setenv("DISKETTE_TERMINAL_ID", id)
 	os.Setenv("DISKETTE_SHELL_KIND", shellKindOf(shell))
+	if exe, err := os.Executable(); err == nil {
+		os.Setenv("PATH", pathWithSelfDir(os.Getenv("PATH"), filepath.Dir(exe)))
+	}
 
 	term, err := Graphite.NewTerminal(app, 0, 0, 0, 0, shell, nil)
 	if err != nil {
 		return tabContent{}, err
 	}
 	return tabContent{terminal: term, display: term, id: id}, nil
+}
+
+// pathWithSelfDir returns path with selfDir prepended, so a shell spawned
+// inside a Terminal tab can always find `diskette` on its own PATH to run
+// the view/sync/tag/untag/select commands (cli.go) — regardless of where
+// the running diskette binary happens to live, since it need not be
+// installed anywhere in particular. selfDir is left alone if it's already
+// on path, so opening several Terminal tabs doesn't pile up duplicates.
+func pathWithSelfDir(path, selfDir string) string {
+	for _, dir := range filepath.SplitList(path) {
+		if dir == selfDir {
+			return path
+		}
+	}
+	if path == "" {
+		return selfDir
+	}
+	return selfDir + string(filepath.ListSeparator) + path
 }
 
 // shellKindOf identifies which of the shells diskette sync knows how to
