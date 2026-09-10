@@ -372,6 +372,32 @@ func TestFilePane_ReloadPreservesCursorAndTags(t *testing.T) {
 	}
 }
 
+func TestFilePane_AutoRefreshPicksUpChangesMadeOutOfBand(t *testing.T) {
+	fp, dir := newTestPane(t)
+	canvas := Graphite.NewCanvas()
+	canvas.Resize(40, 10)
+
+	fp.DrawRelative(canvas, 0, 0, 40, 10) // establishes the auto-refresh baseline time
+	if len(fp.rows) != 4 {
+		t.Fatalf("got %d rows before the out-of-band change, want 4", len(fp.rows))
+	}
+
+	mustWriteFile(t, filepath.Join(dir, "new-from-a-shell-command.txt"), "")
+
+	// Not due yet: a draw right after the baseline must not re-list.
+	fp.DrawRelative(canvas, 0, 0, 40, 10)
+	if len(fp.rows) != 4 {
+		t.Fatalf("got %d rows immediately after the baseline draw, want still 4 (too soon to auto-refresh)", len(fp.rows))
+	}
+
+	fp.lastAutoRefresh = time.Now().Add(-2 * autoRefreshInterval) // force the interval to have elapsed
+	fp.DrawRelative(canvas, 0, 0, 40, 10)
+
+	if len(fp.rows) != 5 {
+		t.Errorf("got %d rows after the auto-refresh interval elapsed, want 5 (picked up the new file)", len(fp.rows))
+	}
+}
+
 func TestFilePane_OnFunctionKeyFiresForFKeysOnly(t *testing.T) {
 	fp, _ := newTestPane(t)
 

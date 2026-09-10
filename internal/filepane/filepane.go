@@ -28,6 +28,14 @@ const doubleClickWindow = 500 * time.Millisecond
 // quick-search buffer, so typing a fresh word doesn't append to a stale one.
 const searchTimeout = time.Second
 
+// autoRefreshInterval is how often a visible FilePane re-lists its own
+// directory on its own, replacing a manual Reload button — a plain
+// re-stat is cheap enough that polling this often costs nothing
+// noticeable, and it's what makes a file appearing (e.g. from a command
+// just run in a terminal tab open alongside this pane) show up without
+// the user having to ask for it.
+const autoRefreshInterval = time.Second
+
 // SortField selects which column FilePane orders its listing by.
 type SortField int
 
@@ -70,6 +78,8 @@ type FilePane struct {
 
 	searchBuf    string
 	lastSearchAt time.Time
+
+	lastAutoRefresh time.Time
 
 	// foundName, if non-empty, names the row a search jumped to — drawn
 	// with a highlight distinct from the cursor and from a tag (see
@@ -296,6 +306,25 @@ func (fp *FilePane) ToggleTag() { fp.toggleTagAndAdvance() }
 // menu item, say) can trigger the same sort change clicking a column
 // header does.
 func (fp *FilePane) SetSort(field SortField) { fp.setSort(field) }
+
+// autoRefresh re-lists the directory once autoRefreshInterval has passed
+// since the last time (Reload itself, on first call, or a prior tick of
+// this same timer) — called every frame from DrawRelative, so only a
+// visible, actually-drawn pane polls at all. A typing quick-search or an
+// open rename/copy modal isn't disturbed: Reload only touches fp.rows,
+// cursor, and tags, which is exactly what a directory listing is.
+func (fp *FilePane) autoRefresh() {
+	now := time.Now()
+	if fp.lastAutoRefresh.IsZero() {
+		fp.lastAutoRefresh = now
+		return
+	}
+	if now.Sub(fp.lastAutoRefresh) < autoRefreshInterval {
+		return
+	}
+	fp.lastAutoRefresh = now
+	fp.Reload()
+}
 
 // Reload re-lists the current directory, preserving the cursor position
 // and tags by entry name where those entries still exist. Callers refresh
@@ -724,6 +753,7 @@ func formatSize(n int64) string {
 // DrawRelative implements Graphite.Widget.
 func (fp *FilePane) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 	fp.BaseWidget.DrawRelative(c, offX, offY, pW, pH)
+	fp.autoRefresh()
 	fp.clampScroll()
 
 	theme := c.Theme()
