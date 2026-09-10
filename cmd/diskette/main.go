@@ -1326,7 +1326,7 @@ func showAbout(app *Graphite.Application) {
 	info := Graphite.NewLabel(40, 2,
 		"Diskette v.0.1.0\n\n"+
 			"A cross-platform dual-pane file manager,\n"+
-			"with FTP, SFTP and SCP support.\n"+
+			"with SFTP remote connections.\n"+
 			"Provides archiving features and build with\n"+
 			"lightweight Graphite TUI framework.\n\n"+
 			"Copyright © 2026 Yehor Oblyvantsov\n"+
