@@ -21,17 +21,23 @@ type SavedTab struct {
 
 // SavedRemote is a pinned Remote tab's connection metadata — everything
 // needed to pre-fill a reconnect prompt, deliberately nothing needed to
-// reconnect silently: no password, no key passphrase. AuthMethod is a
-// plain string ("password"/"privatekey"/"agent"), not this package's own
-// enum, so internal/tabs doesn't need to depend on internal/sftpfs just
-// to describe which one was chosen; cmd/diskette translates between the
-// two.
+// reconnect silently: no password, no key passphrase. Protocol
+// ("sftp"/"ftp") and AuthMethod ("password"/"privatekey"/"agent" for
+// sftp; TLSMode ("none"/"explicit"/"implicit") for ftp) are plain
+// strings, not either backing package's own enum, so internal/tabs
+// doesn't need to depend on internal/sftpfs or internal/ftpfs just to
+// describe which one was chosen; cmd/diskette translates between them.
+// An empty Protocol decodes as "sftp", for a tab saved before this field
+// existed. AuthMethod/KeyPath are sftp-only (unused for an ftp tab);
+// TLSMode is ftp-only (unused for an sftp tab).
 type SavedRemote struct {
+	Protocol   string `json:"protocol,omitempty"`
 	Host       string `json:"host"`
 	Port       int    `json:"port,omitempty"`
 	Username   string `json:"username"`
-	AuthMethod string `json:"authMethod"`
+	AuthMethod string `json:"authMethod,omitempty"`
 	KeyPath    string `json:"keyPath,omitempty"`
+	TLSMode    string `json:"tlsMode,omitempty"`
 }
 
 // MarshalJSON encodes Kind as its String() form ("filelist"/"terminal")

@@ -26,7 +26,6 @@ import (
 	"github.com/yeoblyv/diskette/internal/openwith"
 	"github.com/yeoblyv/diskette/internal/roots"
 	"github.com/yeoblyv/diskette/internal/search"
-	"github.com/yeoblyv/diskette/internal/sftpfs"
 	"github.com/yeoblyv/diskette/internal/tabs"
 	"github.com/yeoblyv/diskette/internal/theme"
 	"github.com/yeoblyv/diskette/internal/vfs"
@@ -291,14 +290,25 @@ type tabContent struct {
 	remote   *connectedRemote
 }
 
-// connectedRemote is a Remote tab's live SFTP session plus the connection
-// metadata pinnedOf persists (see internal/tabs.SavedRemote) — everything
-// needed to show it in the status bar, close it when the tab closes or
-// the app quits, and offer a pre-filled reconnect on restart, but never
-// its password/passphrase.
+// remoteFS is what a Remote tab's backing connection must offer beyond
+// plain vfs.FileSystem: something to call when the tab closes or the app
+// quits. Both internal/sftpfs.SFTPFS and internal/ftpfs.FTPFS already
+// satisfy this with no changes to either package — it exists here purely
+// so connectedRemote and AddRemote don't need to know or care which
+// protocol they're holding.
+type remoteFS interface {
+	vfs.FileSystem
+	Close() error
+}
+
+// connectedRemote is a Remote tab's live SFTP/FTP session plus the
+// connection metadata pinnedOf persists (see internal/tabs.SavedRemote) —
+// everything needed to show it in the status bar, close it when the tab
+// closes or the app quits, and offer a pre-filled reconnect on restart,
+// but never its password/passphrase.
 type connectedRemote struct {
 	label string // "user@host", for the tab name and status bar
-	fs    *sftpfs.SFTPFS
+	fs    remoteFS
 	meta  tabs.SavedRemote
 }
 
@@ -692,13 +702,14 @@ func (p *paneTabs) AddTerminal() error {
 	return nil
 }
 
-// AddRemote adds a new Remote tab — a FileList backed by fs (an already-
-// connected *sftpfs.SFTPFS) instead of this pane's own local p.fs — and
-// switches to it, the same way AddFileList/AddTerminal do. Deliberately
-// bypasses p.fs entirely rather than reusing AddFileList: p.fs is one
-// value shared by every local FileList tab on this pane, fixed to
-// vfs.LocalFS, and was never meant to change per-tab.
-func (p *paneTabs) AddRemote(fs *sftpfs.SFTPFS, path, label string, meta tabs.SavedRemote) {
+// AddRemote adds a new Remote tab — a FileList backed by fs (an
+// already-connected SFTP or FTP session) instead of this pane's own
+// local p.fs — and switches to it, the same way AddFileList/AddTerminal
+// do. Deliberately bypasses p.fs entirely rather than reusing
+// AddFileList: p.fs is one value shared by every local FileList tab on
+// this pane, fixed to vfs.LocalFS, and was never meant to change
+// per-tab.
+func (p *paneTabs) AddRemote(fs remoteFS, path, label string, meta tabs.SavedRemote) {
 	wasFocused := p.HasFocus()
 	content := newFileListContent(p.app, fs, path)
 	p.wireFileList(content.filePane)

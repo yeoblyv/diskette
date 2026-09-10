@@ -155,6 +155,38 @@ func TestSaveLoad_RoundTripsARemoteTabsConnectionMetadataButNeverASecret(t *test
 	}
 }
 
+func TestSaveLoad_RoundTripsAnFTPTabsProtocolAndTLSMode(t *testing.T) {
+	withTempConfigHome(t)
+
+	want := SavedState{
+		Left: []SavedTab{
+			{
+				Kind: Remote, Name: "me@ftp.example.com", Pinned: true,
+				Remote: &SavedRemote{
+					Protocol: "ftp", Host: "ftp.example.com", Port: 21,
+					Username: "me", TLSMode: "explicit",
+				},
+			},
+		},
+		LeftActive: 0,
+	}
+
+	if err := Save(want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if len(got.Left) != 1 || got.Left[0].Remote == nil {
+		t.Fatalf("Left = %+v, want one Remote tab with metadata", got.Left)
+	}
+	if *got.Left[0].Remote != *want.Left[0].Remote {
+		t.Errorf("Remote = %+v, want %+v", got.Left[0].Remote, want.Left[0].Remote)
+	}
+}
+
 func TestSave_CreatesTheConfigDirectory(t *testing.T) {
 	withTempConfigHome(t)
 
