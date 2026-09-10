@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	Graphite "github.com/yeoblyv/graphite"
@@ -22,6 +24,7 @@ import (
 	"github.com/yeoblyv/diskette/internal/openwith"
 	"github.com/yeoblyv/diskette/internal/roots"
 	"github.com/yeoblyv/diskette/internal/search"
+	"github.com/yeoblyv/diskette/internal/tabs"
 	"github.com/yeoblyv/diskette/internal/theme"
 	"github.com/yeoblyv/diskette/internal/vfs"
 )
@@ -46,71 +49,81 @@ func main() {
 
 	fs := vfs.LocalFS{}
 
-	left := filepane.New(0, 0, 0, 0, fs, start)
-	right := filepane.New(0, 0, 0, 0, fs, start)
-	left.OnOpenFile = func(path string) { openFile(app, path) }
-	right.OnOpenFile = func(path string) { openFile(app, path) }
+	leftTabs := newPaneTabs(app, fs)
+	rightTabs := newPaneTabs(app, fs)
+	restoreSavedTabs(leftTabs, rightTabs, start)
 
-	activePane := func() *filepane.FilePane {
-		if right.HasFocus() {
-			return right
+	activeGroup := func() *paneTabs {
+		if rightTabs.HasFocus() {
+			return rightTabs
 		}
-		return left
+		return leftTabs
 	}
-	otherPane := func(p *filepane.FilePane) *filepane.FilePane {
-		if p == left {
-			return right
+	otherGroup := func(g *paneTabs) *paneTabs {
+		if g == leftTabs {
+			return rightTabs
 		}
-		return left
+		return leftTabs
+	}
+	// withActiveFilePane wraps an action that only makes sense against a
+	// FileList tab (rename, copy, delete, ...) so every F-key/menu
+	// callsite doesn't have to repeat the "is the active tab even a file
+	// list" guard — if the focused pane's active tab is a Terminal
+	// instead, the action is silently a no-op rather than acting on stale
+	// or wrong data.
+	withActiveFilePane := func(fn func(fp *filepane.FilePane)) func() {
+		return func() {
+			if fp, ok := activeGroup().ActiveFilePane(); ok {
+				fn(fp)
+			}
+		}
+	}
+	withActivePanes := func(fn func(src, dst *filepane.FilePane)) func() {
+		return func() {
+			src, ok1 := activeGroup().ActiveFilePane()
+			dst, ok2 := otherGroup(activeGroup()).ActiveFilePane()
+			if ok1 && ok2 {
+				fn(src, dst)
+			}
+		}
 	}
 
-	fKeyBar := newFKeyBar(app, right, activePane, otherPane)
+	fKeyBar := newFKeyBar(app, rightTabs, withActiveFilePane, withActivePanes)
 
 	refreshStatus := func() {
-		if q := activePane().SearchQuery(); q != "" {
-			fKeyBar.Status = "Search: " + q
-			return
+		if fp, ok := activeGroup().ActiveFilePane(); ok {
+			if q := fp.SearchQuery(); q != "" {
+				fKeyBar.Status = "Search: " + q
+				return
+			}
 		}
 		fKeyBar.Status = ""
 	}
-	left.OnSearchChanged = func(string) { refreshStatus() }
-	right.OnSearchChanged = func(string) { refreshStatus() }
+	leftTabs.onSearchChanged = refreshStatus
+	rightTabs.onSearchChanged = refreshStatus
 	refreshStatus()
-
-	var diskUsage [2]diskUsageCache // indexed by [left, right]
-	refreshDiskUsage := func(fp *filepane.FilePane, i int) {
-		u, err := diskspace.Query(fp.Path())
-		diskUsage[i] = diskUsageCache{usage: u, ok: err == nil}
-	}
-
-	leftNav := newNavRow(app, left)
-	rightNav := newNavRow(app, right)
-	left.OnPathChanged = func(string) { refreshDiskUsage(left, 0) }
-	right.OnPathChanged = func(string) { refreshDiskUsage(right, 1) }
-	refreshDiskUsage(left, 0)
-	refreshDiskUsage(right, 1)
-
-	leftCol := Graphite.NewFlex(0, 0, 0, 0, Graphite.FlexColumn)
-	leftCol.AddChild(leftNav, 0)
-	leftCol.AddChild(left, 1)
-
-	rightCol := Graphite.NewFlex(0, 0, 0, 0, Graphite.FlexColumn)
-	rightCol.AddChild(rightNav, 0)
-	rightCol.AddChild(right, 1)
 
 	mainRow := Graphite.NewFlex(0, 2, 0, -3, Graphite.FlexRow)
 	mainRow.Gap = 1
-	mainRow.AddChild(leftCol, 1)
-	mainRow.AddChild(newActionGutter(app, left, right), 0)
-	mainRow.AddChild(rightCol, 1)
+	mainRow.AddChild(leftTabs, 1)
+	mainRow.AddChild(newActionGutter(app, leftTabs, rightTabs), 0)
+	mainRow.AddChild(rightTabs, 1)
 
 	diskBar := newDiskSpaceBar(func() statusBarState {
-		idx, ap := 0, left
-		if right.HasFocus() {
-			idx, ap = 1, right
+		group := leftTabs
+		if rightTabs.HasFocus() {
+			group = rightTabs
 		}
-		count, size, hasTagged := ap.TaggedSummary()
-		return statusBarState{usage: diskUsage[idx], taggedCount: count, taggedSize: size, hasTagged: hasTagged}
+		fp, ok := group.ActiveFilePane()
+		if !ok {
+			return statusBarState{}
+		}
+		usage, err := diskspace.Query(fp.Path())
+		count, size, hasTagged := fp.TaggedSummary()
+		return statusBarState{
+			usage:       diskUsageCache{usage: usage, ok: err == nil},
+			taggedCount: count, taggedSize: size, hasTagged: hasTagged,
+		}
 	})
 
 	win.AddWidget(mainRow)
@@ -118,45 +131,65 @@ func main() {
 	win.AddWidget(fKeyBar)
 	// menu is added last so its open dropdown wins Window's hit-test
 	// priority over the panes it visually overlaps — see newMenuStrip.
-	win.AddWidget(newMenuStrip(app, activePane, otherPane))
+	win.AddWidget(newMenuStrip(app, leftTabs, rightTabs, activeGroup, withActiveFilePane, withActivePanes))
 
-	onFKey := func(source *filepane.FilePane) func(Graphite.KeyCode) {
+	fKeyHandler := func(fp *filepane.FilePane) func(Graphite.KeyCode) {
 		return func(key Graphite.KeyCode) {
-			other := otherPane(source)
 			switch key {
 			case Graphite.KeyF1:
-				showFileInfo(app, source)
+				showFileInfo(app, fp)
 			case Graphite.KeyF2:
-				doRename(app, source)
+				doRename(app, fp)
 			case Graphite.KeyF3:
-				showFindFiles(app, source)
+				showFindFiles(app, fp)
 			case Graphite.KeyF5:
-				doCopyOrMove(app, source, other, false)
+				if dst, ok := otherGroup(activeGroup()).ActiveFilePane(); ok {
+					doCopyOrMove(app, fp, dst, false)
+				}
 			case Graphite.KeyF6:
-				doCopyOrMove(app, source, other, true)
+				if dst, ok := otherGroup(activeGroup()).ActiveFilePane(); ok {
+					doCopyOrMove(app, fp, dst, true)
+				}
 			case Graphite.KeyF7:
-				doMkdir(app, source)
+				doMkdir(app, fp)
 			case Graphite.KeyF8:
-				doDelete(app, source)
+				doDelete(app, fp)
 			case Graphite.KeyF10:
-				requestQuit(app)
+				requestQuit(app, leftTabs, rightTabs)
 			}
 		}
 	}
-	left.OnFunctionKey = onFKey(left)
-	right.OnFunctionKey = onFKey(right)
+	leftTabs.onFileListFKey = fKeyHandler
+	rightTabs.onFileListFKey = fKeyHandler
 
-	app.SetOnQuitRequested(func() { requestQuit(app) })
+	app.SetOnQuitRequested(func() { requestQuit(app, leftTabs, rightTabs) })
 	app.SetWindow(win)
 	app.Run()
 }
 
+// defaultShell picks the interactive shell a new Terminal tab spawns:
+// $SHELL on Unix (falling back to /bin/sh if unset), %COMSPEC% on
+// Windows (falling back to cmd.exe) — the same fallback chain a real
+// terminal emulator's own "open a new tab" uses.
+func defaultShell() string {
+	if runtime.GOOS == "windows" {
+		if comspec := os.Getenv("COMSPEC"); comspec != "" {
+			return comspec
+		}
+		return "cmd.exe"
+	}
+	if sh := os.Getenv("SHELL"); sh != "" {
+		return sh
+	}
+	return "/bin/sh"
+}
+
 // newNavButton creates a small, non-focusable Button. It is deliberately
 // not focusable (IsFocusable is forced back to false right after
-// construction): the two FilePanes must stay the only two top-level
-// focusable widgets in the window, so Tab keeps switching directly between
-// them — see the project's architecture notes on this. Clicking it still
-// works regardless of focusability, since Window delivers a mouse click to
+// construction): only the active tab's own content widget in each pane
+// stays focusable, so Tab keeps switching directly between the two panes
+// — see the project's architecture notes on this. Clicking it still works
+// regardless of focusability, since Window delivers a mouse click to
 // whatever it hit-tests under the pointer independently of the Tab order.
 func newNavButton(label string, onClick func()) *Graphite.Button {
 	btn := Graphite.NewButton(0, 0, label, Graphite.BtnDefault, onClick)
@@ -175,46 +208,352 @@ func openFile(app *Graphite.Application, path string) {
 	}
 }
 
-// newNavRow builds one pane's navigation strip — Back/Forward/Refresh, a
-// root/drive picker, and the clickable current-path bar — as a Flex row so
-// the path bar always fills exactly the space the fixed-width buttons
+// newNavRow builds one FileList tab's navigation strip — Back/Forward, a
+// root/drive picker, and the clickable current-path bar — as a Flex row
+// so the path bar always fills exactly the space the fixed-width buttons
 // leave, at any terminal width. There is deliberately no "up one level"
-// button: the ".." row already at the top of every listing does that, via
-// Enter or a double-click, exactly like every other entry.
+// button (the ".." row already at the top of every listing does that) and
+// no manual Reload button — FilePane now auto-refreshes its own listing
+// on a timer (see internal/filepane's autoRefresh).
 func newNavRow(app *Graphite.Application, fp *filepane.FilePane) *Graphite.Flex {
 	row := Graphite.NewFlex(0, 0, 0, 1, Graphite.FlexRow)
 	row.Gap = 1
 	row.AddChild(newNavButton("<", func() { fp.Back() }), 0)
 	row.AddChild(newNavButton(">", func() { fp.Forward() }), 0)
-	row.AddChild(newNavButton("Reload", func() { fp.Reload() }), 0)
 	row.AddChild(newNavButton("Root", func() { promptChooseRoot(app, fp) }), 0)
 	row.AddChild(newPathBar(app, fp), 1)
 	return row
 }
 
+// tabContent is what one tab actually displays: for a FileList tab,
+// filePane is the raw *filepane.FilePane (for everything that needs to
+// act on it directly — F-keys, the menu, the gutter) and display is that
+// FilePane wrapped in its own nav-row Flex; for a Terminal tab, terminal
+// and display are the same bare *Graphite.Terminal. Kept as two named
+// fields rather than a type switch on display everywhere a caller needs
+// the concrete widget back.
+type tabContent struct {
+	filePane *filepane.FilePane
+	terminal *Graphite.Terminal
+	display  Graphite.Widget
+}
+
+// focusable returns the one widget within this content that's actually
+// focusable — the bare FilePane or Terminal, never the wrapping Flex a
+// FileList tab draws its nav row in.
+func (c tabContent) focusable() Graphite.Widget {
+	if c.filePane != nil {
+		return c.filePane
+	}
+	return c.terminal
+}
+
+// newFileListContent builds a fresh FileList tab at path: its own
+// FilePane (independent cursor, tags, and back/forward history from every
+// other tab) plus its nav row, wired the same way every FileList tab
+// always has been.
+func newFileListContent(app *Graphite.Application, fs vfs.FileSystem, path string) tabContent {
+	fp := filepane.New(0, 0, 0, 0, fs, path)
+	fp.OnOpenFile = func(p string) { openFile(app, p) }
+
+	col := Graphite.NewFlex(0, 0, 0, 0, Graphite.FlexColumn)
+	col.AddChild(newNavRow(app, fp), 0)
+	col.AddChild(fp, 1)
+
+	return tabContent{filePane: fp, display: col}
+}
+
+// newTerminalContent spawns a fresh shell in a new Terminal tab.
+func newTerminalContent(app *Graphite.Application) (tabContent, error) {
+	term, err := Graphite.NewTerminal(app, 0, 0, 0, 0, defaultShell(), nil)
+	if err != nil {
+		return tabContent{}, err
+	}
+	return tabContent{terminal: term, display: term}, nil
+}
+
+// tabName returns a FileList tab's display name (the directory's own base
+// name — "Root" for a filesystem root, which has no meaningful base name
+// of its own) or a Terminal tab's, which is always just "Terminal": there
+// is no path or title to derive a nicer one from without an OSC 0/2
+// title, which this pane doesn't read.
+func tabName(kind tabs.Kind, path string) string {
+	if kind == tabs.Terminal {
+		return "Terminal"
+	}
+	base := filepath.Base(path)
+	if base == "." || base == string(filepath.Separator) {
+		return "Root"
+	}
+	return base
+}
+
+// paneTabs is one side's whole tab strip and content area: a row of tab
+// labels (click to switch, pinned ones marked) at its own top row, and
+// whichever tab is active filling the rest — GetChildren returns only
+// that one active tab's content, so Window's own focus-cycling and
+// hit-test recursion (see graphite's architecture docs) naturally reach
+// only it, without paneTabs needing to manually toggle IsFocusable on the
+// tabs it isn't showing.
+type paneTabs struct {
+	Graphite.BaseWidget
+	app   *Graphite.Application
+	fs    vfs.FileSystem
+	group tabs.Group
+
+	// onSearchChanged/onFileListFKey are set once by main() and applied to
+	// every FileList tab's FilePane as it's created — a tab created after
+	// startup (via the Tab menu) needs the exact same wiring one created
+	// at startup already has.
+	onSearchChanged func()
+	onFileListFKey  func(*filepane.FilePane) func(Graphite.KeyCode)
+
+	tabRects []tabRect // recomputed every DrawRelative; used by HandleEvent
+}
+
+type tabRect struct {
+	x0, x1 int
+	idx    int
+}
+
+// newPaneTabs creates an empty tab group with no tabs yet — main() (or
+// restoreSavedTabs) adds the first one right after construction, since a
+// pane must always show something.
+func newPaneTabs(app *Graphite.Application, fs vfs.FileSystem) *paneTabs {
+	p := &paneTabs{BaseWidget: Graphite.NewBaseWidget(0, 0, 0, 0), app: app, fs: fs}
+	p.IsFocusable = false
+	return p
+}
+
+// wireFileList applies this pane's own onSearchChanged/onFileListFKey
+// hooks to fp — every FileList tab's FilePane needs them, not just the
+// first one created at startup.
+func (p *paneTabs) wireFileList(fp *filepane.FilePane) {
+	fp.OnSearchChanged = func(string) {
+		if p.onSearchChanged != nil {
+			p.onSearchChanged()
+		}
+	}
+	fp.OnFunctionKey = func(key Graphite.KeyCode) {
+		if p.onFileListFKey != nil {
+			p.onFileListFKey(fp)(key)
+		}
+	}
+}
+
+// AddFileList adds a new FileList tab at path and switches to it,
+// preserving keyboard focus on this pane if it already had it (matching
+// SwitchTo's own behavior, since Add ends by making the new tab active).
+func (p *paneTabs) AddFileList(path string) {
+	wasFocused := p.HasFocus()
+	content := newFileListContent(p.app, p.fs, path)
+	p.wireFileList(content.filePane)
+	p.group.Add(&tabs.Tab{Kind: tabs.FileList, Name: tabName(tabs.FileList, path), Widget: content})
+	if wasFocused {
+		content.focusable().SetFocus(true)
+	}
+}
+
+// AddTerminal adds a new Terminal tab and switches to it, the same way
+// AddFileList does. Reports an error if the shell couldn't be spawned
+// (a real OS-level failure — no pty available, the shell binary missing —
+// not something to silently swallow).
+func (p *paneTabs) AddTerminal() error {
+	wasFocused := p.HasFocus()
+	content, err := newTerminalContent(p.app)
+	if err != nil {
+		return err
+	}
+	p.group.Add(&tabs.Tab{Kind: tabs.Terminal, Name: tabName(tabs.Terminal, ""), Widget: content})
+	if wasFocused {
+		content.focusable().SetFocus(true)
+	}
+	return nil
+}
+
+// SwitchTo makes the tab at idx active, moving keyboard focus to its
+// content if this pane already had focus (so switching tabs in the pane
+// you're already working in doesn't silently kick focus to the other
+// pane) and leaving focus alone otherwise (switching a tab in a pane you
+// aren't in shouldn't steal it).
+func (p *paneTabs) SwitchTo(idx int) {
+	wasFocused := p.HasFocus()
+	if old, ok := p.contentAt(p.group.Active); ok {
+		old.focusable().SetFocus(false)
+	}
+	p.group.SetActive(idx)
+	if wasFocused {
+		if newC, ok := p.contentAt(p.group.Active); ok {
+			newC.focusable().SetFocus(true)
+		}
+	}
+}
+
+// CloseTabAt closes the tab at idx (refusing to close a pane's last tab,
+// same as tabs.Group.Close), preserving focus the same way SwitchTo does
+// when closing the active tab moves it to a different one.
+func (p *paneTabs) CloseTabAt(idx int) bool {
+	wasFocused := p.HasFocus()
+	if !p.group.Close(idx) {
+		return false
+	}
+	if wasFocused {
+		if c, ok := p.contentAt(p.group.Active); ok {
+			c.focusable().SetFocus(true)
+		}
+	}
+	return true
+}
+
+// contentAt returns tab idx's tabContent, if idx is in range.
+func (p *paneTabs) contentAt(idx int) (tabContent, bool) {
+	if idx < 0 || idx >= len(p.group.Tabs) {
+		return tabContent{}, false
+	}
+	c, ok := p.group.Tabs[idx].Widget.(tabContent)
+	return c, ok
+}
+
+// activeContent returns the active tab's content.
+func (p *paneTabs) activeContent() (tabContent, bool) {
+	return p.contentAt(p.group.Active)
+}
+
+// ActiveFilePane returns the active tab's FilePane, or (nil, false) if
+// the active tab is a Terminal instead.
+func (p *paneTabs) ActiveFilePane() (*filepane.FilePane, bool) {
+	c, ok := p.activeContent()
+	if !ok || c.filePane == nil {
+		return nil, false
+	}
+	return c.filePane, true
+}
+
+// ActiveTerminal returns the active tab's Terminal, or (nil, false) if
+// the active tab is a FileList instead.
+func (p *paneTabs) ActiveTerminal() (*Graphite.Terminal, bool) {
+	c, ok := p.activeContent()
+	if !ok || c.terminal == nil {
+		return nil, false
+	}
+	return c.terminal, true
+}
+
+// HasFocus overrides BaseWidget.HasFocus: paneTabs itself is never the
+// actual focus target (IsFocusable is false), only whichever tab's
+// content is currently showing, so "this pane has focus" means "the
+// active tab's own focusable widget has focus."
+func (p *paneTabs) HasFocus() bool {
+	c, ok := p.activeContent()
+	if !ok {
+		return false
+	}
+	return c.focusable().HasFocus()
+}
+
+// GetChildren implements Widget: only the active tab's content is ever
+// reachable by Window's focus-cycling and hit-test recursion — an
+// inactive tab isn't drawn, and (per HasFocus's own reasoning above)
+// isn't part of the Tab order either.
+func (p *paneTabs) GetChildren() []Graphite.Widget {
+	c, ok := p.activeContent()
+	if !ok {
+		return nil
+	}
+	return []Graphite.Widget{c.display}
+}
+
+// tabStripHeight is the fixed one row the tab labels occupy above
+// whichever tab's content fills the rest of paneTabs.
+const tabStripHeight = 1
+
+// DrawRelative implements Widget.
+func (p *paneTabs) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
+	p.BaseWidget.DrawRelative(c, offX, offY, pW, pH)
+	theme := c.Theme()
+
+	for x := 0; x < p.LastW; x++ {
+		c.DrawCell(p.AbsX+x, p.AbsY, " ", theme.BgWindow, theme.FgWindow)
+	}
+
+	p.tabRects = p.tabRects[:0]
+	cursorX := p.AbsX
+	for i, t := range p.group.Tabs {
+		label := " " + t.Name + " "
+		if t.Pinned {
+			label = " ●" + t.Name + " " // ● prefix marks a pinned tab
+		}
+		w := len([]rune(label))
+		bg, fg := theme.BgWindow, theme.FgDisabled
+		if i == p.group.Active {
+			bg, fg = navAccent, navAccent.ContrastText()
+		}
+		c.DrawTextBounded(cursorX, p.AbsY, w, label, bg, fg)
+		p.tabRects = append(p.tabRects, tabRect{x0: cursorX, x1: cursorX + w, idx: i})
+		cursorX += w
+	}
+
+	if content, ok := p.activeContent(); ok {
+		content.display.DrawRelative(c, p.AbsX, p.AbsY+tabStripHeight, p.LastW, p.LastH-tabStripHeight)
+	}
+}
+
+// DrawOverlay implements Widget: forwarded to the active tab's content
+// (a MenuStrip-style dropdown or similar living inside it would otherwise
+// never get its overlay pass).
+func (p *paneTabs) DrawOverlay(c *Graphite.Canvas, offX, offY, pW, pH int) {
+	if content, ok := p.activeContent(); ok {
+		content.display.DrawOverlay(c, p.AbsX, p.AbsY+tabStripHeight, p.LastW, p.LastH-tabStripHeight)
+	}
+}
+
+// HandleEvent implements Widget. Window's own hit-test recursion (see
+// GetChildren) already routes a click inside the content area straight to
+// the active tab's own content, bypassing this entirely — so by the time
+// this runs, ev is always either a click on the tab-strip row itself, or
+// something outside both (which HitTest wouldn't have matched in the
+// first place, so it can't actually reach here).
+func (p *paneTabs) HandleEvent(ev Graphite.Event) {
+	if ev.Type != Graphite.EventMouseDown || ev.MouseY != p.AbsY {
+		return
+	}
+	for _, r := range p.tabRects {
+		if ev.MouseX >= r.x0 && ev.MouseX < r.x1 {
+			p.SwitchTo(r.idx)
+			return
+		}
+	}
+}
+
 // newActionGutter builds the fixed-width column between the two panes
 // holding Copy and Move — two buttons, not four: each is a dirButton whose
 // label flips to always name the focused pane as source and the other one
-// as destination, recomputed fresh every frame, rather than a separate
-// static button per direction. A weight-1 spacer above and below the three
-// fixed-size buttons centers them in the gutter's full height instead of
-// leaving them stacked at the top. ZIP/UNZIP is a placeholder: disabled
-// (grayed out, inert) until archive pack/unpack between the two panes is
-// actually implemented, shown now — as two buttons, Zip and Unzip, the same
-// shape as Copy/Move rather than one combined button — rather than added
-// later so the gutter's eventual layout doesn't shift underneath whatever
-// already got used to it. Each button's Width 0 stretches it to the
-// gutter's full width (see dirButton's own DrawRelative for why that
-// requires a custom widget rather than a plain Button).
-func newActionGutter(app *Graphite.Application, left, right *filepane.FilePane) *Graphite.Flex {
+// as destination, recomputed fresh every frame (there is no "focus
+// changed" event to hook, so drawing fresh is what keeps it honest). A
+// weight-1 spacer above and below the four fixed-size buttons centers
+// them in the gutter's full height instead of leaving them stacked at the
+// top. ZIP/UNZIP is a placeholder: disabled (grayed out, inert) until
+// archive pack/unpack between the two panes is actually implemented.
+// Each button's Width 0 stretches it to the gutter's full width (see
+// dirButton's own DrawRelative for why that requires a custom widget
+// rather than a plain Button).
+func newActionGutter(app *Graphite.Application, left, right *paneTabs) *Graphite.Flex {
 	gutter := Graphite.NewFlex(0, 0, 15, 0, Graphite.FlexColumn)
 	gutter.Gap = 1
 	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
-	gutter.AddChild(newDirButton(left, right, "Copy", func(src, dst *filepane.FilePane) {
-		doCopyOrMove(app, src, dst, false)
+	gutter.AddChild(newDirButton(left, right, "Copy", func(src, dst *paneTabs) {
+		srcFP, ok1 := src.ActiveFilePane()
+		dstFP, ok2 := dst.ActiveFilePane()
+		if ok1 && ok2 {
+			doCopyOrMove(app, srcFP, dstFP, false)
+		}
 	}), 0)
-	gutter.AddChild(newDirButton(left, right, "Move", func(src, dst *filepane.FilePane) {
-		doCopyOrMove(app, src, dst, true)
+	gutter.AddChild(newDirButton(left, right, "Move", func(src, dst *paneTabs) {
+		srcFP, ok1 := src.ActiveFilePane()
+		dstFP, ok2 := dst.ActiveFilePane()
+		if ok1 && ok2 {
+			doCopyOrMove(app, srcFP, dstFP, true)
+		}
 	}), 0)
 	gutter.AddChild(newDirButton(left, right, "Zip", nil), 0)
 	gutter.AddChild(newDirButton(left, right, "Unzip", nil), 0)
@@ -224,32 +563,31 @@ func newActionGutter(app *Graphite.Application, left, right *filepane.FilePane) 
 
 // dirButton is a gutter button whose label names whichever pane currently
 // has focus as the source and the other one as the destination, recomputed
-// every frame (there is no "focus changed" event to hook, so drawing fresh
-// is what keeps it honest). Copy/Move are wired to onClick; Zip/Unzip pass
-// a nil onClick and render dimmed and inert, the same shape as Copy/Move
-// so the gutter reads as one consistent design, ready to wire up once
-// archiving is implemented. Deliberately not a Graphite.Button: a Button's
+// every frame. Copy/Move are wired to onClick; Zip/Unzip pass a nil
+// onClick and render dimmed and inert, the same shape as Copy/Move so the
+// gutter reads as one consistent design, ready to wire up once archiving
+// is implemented. Deliberately not a Graphite.Button: a Button's
 // background only fills the exact width its own text occupies, not
 // whatever extra width a Flex weight hands it, and its Text is a plain
 // field with no per-frame hook for a label that must track live state.
 type dirButton struct {
 	Graphite.BaseWidget
-	left, right *filepane.FilePane
+	left, right *paneTabs
 	action      string
-	onClick     func(src, dst *filepane.FilePane)
+	onClick     func(src, dst *paneTabs)
 }
 
 // newDirButton creates a dirButton with Width 0, stretching it to fill
 // whatever width its parent Flex offers (see BaseWidget's zero/negative
 // width convention). A nil onClick renders it dimmed and inert.
-func newDirButton(left, right *filepane.FilePane, action string, onClick func(src, dst *filepane.FilePane)) *dirButton {
+func newDirButton(left, right *paneTabs, action string, onClick func(src, dst *paneTabs)) *dirButton {
 	base := Graphite.NewBaseWidget(0, 0, 0, 1)
 	return &dirButton{BaseWidget: base, left: left, right: right, action: action, onClick: onClick}
 }
 
 // srcDst returns (source, destination) for this click: always from
 // whichever pane is focused toward the other one.
-func (d *dirButton) srcDst() (src, dst *filepane.FilePane) {
+func (d *dirButton) srcDst() (src, dst *paneTabs) {
 	if d.right.HasFocus() {
 		return d.right, d.left
 	}
@@ -300,10 +638,13 @@ func (d *dirButton) HandleEvent(ev Graphite.Event) {
 	d.onClick(src, dst)
 }
 
-// diskUsageCache is a snapshot of diskspace.Query for one pane, refreshed
-// on navigation (see main's refreshDiskUsage) rather than every frame —
-// statfs is cheap, but there is no reason to call it on every one of the
-// render loop's ~100 iterations per second when the path hasn't changed.
+// diskUsageCache is one disk-usage query's result — recomputed fresh
+// every frame by diskSpaceBar's own state callback rather than cached, now
+// that "which pane/tab is active" can change from more than just
+// navigation (switching tabs doesn't fire FilePane.OnPathChanged, so a
+// cache keyed off that would go stale the moment tabs entered the
+// picture) — a local statfs is cheap enough that recomputing it ~100
+// times a second is not a real cost.
 type diskUsageCache struct {
 	usage diskspace.Usage
 	ok    bool
@@ -311,7 +652,9 @@ type diskUsageCache struct {
 
 // statusBarState is one frame's worth of everything the bottom status row
 // needs: the tagged-selection summary for whichever pane is focused, and
-// that pane's cached disk usage.
+// that pane's disk usage. Both are the zero value when the focused pane's
+// active tab is a Terminal rather than a FileList — there is nothing
+// file-related to report on.
 type statusBarState struct {
 	usage       diskUsageCache
 	taggedCount int
@@ -451,21 +794,22 @@ func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache 
 // phase), and F9/Menu wasn't required by this phase's scope. Showing them
 // dimmed is honest about that instead of quietly leaving them off the
 // bar's layout. Every active key is RolePrimary (the palette's lime
-// accent) except Delete, which is destructive and stays RoleDanger — one
-// accent color for everything, one exception, exactly as specified, not a
-// color per action.
-func newFKeyBar(app *Graphite.Application, right *filepane.FilePane, active func() *filepane.FilePane, other func(*filepane.FilePane) *filepane.FilePane) *fkeybar.Bar {
+// accent) except Delete, which is destructive and stays RoleDanger.
+// withFP/withPanes are the same active-FileList guards main() builds for
+// the menu, reused here so F1/F2/F3/F7/F8 (and F5/F6's dst lookup) all
+// share one no-op-on-a-Terminal-tab behavior.
+func newFKeyBar(app *Graphite.Application, right *paneTabs, withFP func(func(*filepane.FilePane)) func(), withPanes func(func(src, dst *filepane.FilePane)) func()) *fkeybar.Bar {
 	bar := fkeybar.New(0, -1, []fkeybar.Key{
-		{Label: "F1", Text: "Info", OnClick: func() { showFileInfo(app, active()) }},
-		{Label: "F2", Text: "Rename", OnClick: func() { doRename(app, active()) }},
-		{Label: "F3", Text: "Find", OnClick: func() { showFindFiles(app, active()) }},
+		{Label: "F1", Text: "Info", OnClick: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
+		{Label: "F2", Text: "Rename", OnClick: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
+		{Label: "F3", Text: "Find", OnClick: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
 		{Label: "F4", Text: "Edit"},
-		{Label: "F5", Text: "Copy Right", OnClick: func() { doCopyOrMove(app, active(), other(active()), false) }},
-		{Label: "F6", Text: "Move Right", OnClick: func() { doCopyOrMove(app, active(), other(active()), true) }},
-		{Label: "F7", Text: "MkDir", OnClick: func() { doMkdir(app, active()) }},
-		{Label: "F8", Text: "Delete", Role: fkeybar.RoleDanger, OnClick: func() { doDelete(app, active()) }},
+		{Label: "F5", Text: "Copy Right", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
+		{Label: "F6", Text: "Move Right", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
+		{Label: "F7", Text: "MkDir", OnClick: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
+		{Label: "F8", Text: "Delete", Role: fkeybar.RoleDanger, OnClick: withFP(func(fp *filepane.FilePane) { doDelete(app, fp) })},
 		{Label: "F9", Text: "Menu"},
-		{Label: "F10", Text: "Quit", OnClick: func() { requestQuit(app) }},
+		{Label: "F10", Text: "Quit"},
 	})
 	// F5/F6's Text names the destination pane explicitly, kept current
 	// every frame the same way dirButton's own label does — there is no
@@ -484,36 +828,52 @@ func newFKeyBar(app *Graphite.Application, right *filepane.FilePane, active func
 
 // newMenuStrip builds the top menu bar as a mouse-only duplicate of the
 // F-key actions and a few operations that otherwise only have a keyboard
-// or header-click path (per the project's spec, an optional pointer-driven
-// alternative, not a replacement for either). Every item here maps to a
-// real, already-implemented action — no category exists just to look like
-// a classic commander's fuller menu bar (Total Commander's own Network/
-// Configuration categories, say, have no equivalent yet in this phase).
+// or header-click path, plus the new Tab category (Add's New file
+// list/New terminal submenu, Manage Tabs, Pin/Unpin, Close) — the reason
+// MenuStrip grew separator/SubItems support in the first place.
 // IsFocusable is forced back to false right after construction, same
-// reasoning as newNavButton: MenuStrip only ever responds to
-// EventMouseDown anyway (see graphite's widgets.go), so it loses no
-// functionality by staying out of the Tab cycle, and the two FilePanes
-// stay the only two top-level focusable widgets in the window.
-func newMenuStrip(app *Graphite.Application, active func() *filepane.FilePane, other func(*filepane.FilePane) *filepane.FilePane) *Graphite.MenuStrip {
+// reasoning as newNavButton.
+func newMenuStrip(app *Graphite.Application, left, right *paneTabs, active func() *paneTabs, withFP func(func(*filepane.FilePane)) func(), withPanes func(func(src, dst *filepane.FilePane)) func()) *Graphite.MenuStrip {
 	menu := Graphite.NewMenuStrip([]Graphite.MenuCategory{
 		{Label: "File", Items: []Graphite.MenuItem{
-			{Label: "File Info     F1", Action: func() { showFileInfo(app, active()) }},
-			{Label: "Rename        F2", Action: func() { doRename(app, active()) }},
-			{Label: "Find          F3", Action: func() { showFindFiles(app, active()) }},
-			{Label: "Copy          F5", Action: func() { doCopyOrMove(app, active(), other(active()), false) }},
-			{Label: "Move          F6", Action: func() { doCopyOrMove(app, active(), other(active()), true) }},
-			{Label: "New Folder    F7", Action: func() { doMkdir(app, active()) }},
-			{Label: "Delete        F8", Action: func() { doDelete(app, active()) }},
-			{Label: "Quit         F10", Action: func() { requestQuit(app) }},
+			{Label: "File Info     F1", Action: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
+			{Label: "Rename        F2", Action: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
+			{Label: "Find          F3", Action: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
+			{Label: "Copy          F5", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
+			{Label: "Move          F6", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
+			{Label: "New Folder    F7", Action: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
+			{Label: "Delete        F8", Action: withFP(func(fp *filepane.FilePane) { doDelete(app, fp) })},
+			{Label: "Quit         F10", Action: func() { requestQuit(app, left, right) }},
 		}},
 		{Label: "Mark", Items: []Graphite.MenuItem{
-			{Label: "Tag/Untag    Ins", Action: func() { active().ToggleTag() }},
+			{Label: "Tag/Untag    Ins", Action: withFP(func(fp *filepane.FilePane) { fp.ToggleTag() })},
 		}},
 		{Label: "View", Items: []Graphite.MenuItem{
-			{Label: "Sort by Name", Action: func() { active().SetSort(filepane.SortByName) }},
-			{Label: "Sort by Size", Action: func() { active().SetSort(filepane.SortBySize) }},
-			{Label: "Sort by Date", Action: func() { active().SetSort(filepane.SortByDate) }},
-			{Label: "Refresh", Action: func() { active().Reload() }},
+			{Label: "Sort by Name", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByName) })},
+			{Label: "Sort by Size", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortBySize) })},
+			{Label: "Sort by Date", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByDate) })},
+			{Label: "Refresh", Action: withFP(func(fp *filepane.FilePane) { fp.Reload() })},
+		}},
+		{Label: "Tab", Items: []Graphite.MenuItem{
+			{Label: "Add", SubItems: []Graphite.MenuItem{
+				{Label: "New file list", Action: func() {
+					if fp, ok := active().ActiveFilePane(); ok {
+						active().AddFileList(fp.Path())
+					} else {
+						active().AddFileList(mustGetwd())
+					}
+				}},
+				{Label: "New terminal", Action: func() {
+					if err := active().AddTerminal(); err != nil {
+						app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+					}
+				}},
+			}},
+			{Separator: true},
+			{Label: "Pin/Unpin Tab", Action: func() { active().group.TogglePin(active().group.Active) }},
+			{Label: "Close Tab", Action: func() { active().CloseTabAt(active().group.Active) }},
+			{Separator: true},
+			{Label: "Manage Tabs...", Action: func() { showManageTabs(app, left, right) }},
 		}},
 		{Label: "Help", Items: []Graphite.MenuItem{
 			{Label: "About", Action: func() { showAbout(app) }},
@@ -524,10 +884,25 @@ func newMenuStrip(app *Graphite.Application, active func() *filepane.FilePane, o
 	return menu
 }
 
+// mustGetwd is Add's fallback root for a brand new FileList tab opened
+// from a pane whose active tab is a Terminal (so there's no "current
+// path" to inherit) — the process's own working directory, the same
+// starting point the very first tab of each pane uses.
+func mustGetwd() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return string(filepath.Separator)
+	}
+	return dir
+}
+
 // requestQuit asks the user to confirm before actually quitting — wired to
-// both Escape (via Application.SetOnQuitRequested) and F10.
-func requestQuit(app *Graphite.Application) {
+// both Escape (via Application.SetOnQuitRequested) and F10. Saves pinned
+// tabs first (see saveTabs), so "protected from reset on restart" holds
+// even for a quit the user didn't cancel out of.
+func requestQuit(app *Graphite.Application, left, right *paneTabs) {
 	Graphite.ShowConfirm(app, " Quit ", "Quit Diskette?", Graphite.BtnDanger, func() {
+		saveTabs(left, right)
 		app.Quit()
 	})
 }
@@ -975,4 +1350,162 @@ func showConflictModal(app *Graphite.Application, c copyengine.Conflict, respond
 	}))
 
 	app.SetModal(mod)
+}
+
+// showManageTabs implements the Tab menu's "Manage Tabs...": both panes'
+// tabs side by side, each in its own ListBox (● prefix marks a pinned
+// one; selecting a row toggles its pin — a plain click being the fastest
+// path to "protect this from being reset on restart" rather than needing
+// a separate button per row), plus a small add/close toolbar under each.
+func showManageTabs(app *Graphite.Application, left, right *paneTabs) {
+	mod := Graphite.NewWindow(74, 18, " Manage Tabs ")
+
+	mod.AddWidget(Graphite.NewLabel(2, 1, "Left"))
+	mod.AddWidget(Graphite.NewLabel(38, 1, "Right"))
+
+	// Height -6, not a fixed number: like every other button row anchored
+	// from the bottom in this project (see doCopyOrMove's progress modal),
+	// a fixed row number here would silently drift into the add/close
+	// toolbar row below once padding is accounted for — this stops
+	// exactly 2 rows above it instead, regardless of the window's exact
+	// content-area height.
+	leftList := Graphite.NewListBox(2, 2, 34, -6, tabListLabels(left), nil)
+	rightList := Graphite.NewListBox(38, 2, 34, -6, tabListLabels(right), nil)
+	mod.AddWidget(leftList)
+	mod.AddWidget(rightList)
+
+	refresh := func() {
+		leftList.Items = tabListLabels(left)
+		rightList.Items = tabListLabels(right)
+	}
+	leftList.OnSelect = func(idx int, _ string) { left.group.TogglePin(idx); refresh() }
+	rightList.OnSelect = func(idx int, _ string) { right.group.TogglePin(idx); refresh() }
+
+	// Y=-4: one row above Done (-2), the same bottom-anchored convention,
+	// so the two rows never collide regardless of the window's exact
+	// content-area height (see graphite's own dialogs.go for the bug this
+	// avoids: a fixed positive row number silently overlapping a
+	// bottom-anchored one once PaddingY is accounted for).
+	addRow := func(x int, p *paneTabs, list *Graphite.ListBox) {
+		mod.AddWidget(Graphite.NewButton(x, -4, "+ Files", Graphite.BtnDefault, func() {
+			path := mustGetwd()
+			if fp, ok := p.ActiveFilePane(); ok {
+				path = fp.Path()
+			}
+			p.AddFileList(path)
+			refresh()
+		}))
+		mod.AddWidget(Graphite.NewButton(x+11, -4, "+ Term", Graphite.BtnDefault, func() {
+			if err := p.AddTerminal(); err != nil {
+				app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+				return
+			}
+			refresh()
+		}))
+		mod.AddWidget(Graphite.NewButton(x+21, -4, "Close", Graphite.BtnDanger, func() {
+			p.CloseTabAt(list.Selected)
+			refresh()
+		}))
+	}
+	addRow(2, left, leftList)
+	addRow(38, right, rightList)
+
+	mod.AddWidget(Graphite.NewButton(2, -2, "Done", Graphite.BtnDefault, func() {
+		app.CloseModal()
+	}))
+
+	app.SetModal(mod)
+}
+
+// tabListLabels renders p's tabs for showManageTabs' ListBox: a ● prefix
+// for a pinned tab, the active tab's name in brackets so it's visible
+// which one you're currently looking at.
+func tabListLabels(p *paneTabs) []string {
+	labels := make([]string, len(p.group.Tabs))
+	for i, t := range p.group.Tabs {
+		name := t.Name
+		if i == p.group.Active {
+			name = "[" + name + "]"
+		}
+		if t.Pinned {
+			labels[i] = "● " + name
+		} else {
+			labels[i] = "  " + name
+		}
+	}
+	return labels
+}
+
+// restoreSavedTabs seeds left/right from tabs.Load()'s pinned tabs, or —
+// on any load error (nothing saved yet, a fresh install, a corrupt file)
+// or a side with no saved tabs — falls back to the one thing every
+// version of diskette before tabs existed already did: a single FileList
+// tab at start.
+func restoreSavedTabs(left, right *paneTabs, start string) {
+	state, err := tabs.Load()
+	if err != nil {
+		left.AddFileList(start)
+		right.AddFileList(start)
+		return
+	}
+	restoreSide(left, state.Left, state.LeftActive, start)
+	restoreSide(right, state.Right, state.RightActive, start)
+}
+
+func restoreSide(p *paneTabs, saved []tabs.SavedTab, active int, start string) {
+	for _, st := range saved {
+		switch st.Kind {
+		case tabs.Terminal:
+			if err := p.AddTerminal(); err == nil {
+				p.group.Tabs[len(p.group.Tabs)-1].Pinned = true
+				p.group.Tabs[len(p.group.Tabs)-1].Name = st.Name
+			}
+		default:
+			path := st.Path
+			if _, err := os.Stat(path); err != nil {
+				path = start // the saved directory no longer exists
+			}
+			p.AddFileList(path)
+			p.group.Tabs[len(p.group.Tabs)-1].Pinned = true
+			p.group.Tabs[len(p.group.Tabs)-1].Name = st.Name
+		}
+	}
+	if len(p.group.Tabs) == 0 {
+		p.AddFileList(start)
+		return
+	}
+	p.group.SetActive(active)
+}
+
+// saveTabs writes every pinned tab (on either pane) to disk, so pinning is
+// genuinely "protected from reset on restart" — an unpinned tab is
+// deliberately not saved. A write failure (a read-only config directory,
+// say) is reported rather than silently losing the user's pins.
+func saveTabs(left, right *paneTabs) {
+	state := tabs.SavedState{
+		Left:        pinnedOf(left),
+		LeftActive:  left.group.Active,
+		Right:       pinnedOf(right),
+		RightActive: right.group.Active,
+	}
+	tabs.Save(state) // best-effort: a failed save here shouldn't block quitting
+}
+
+func pinnedOf(p *paneTabs) []tabs.SavedTab {
+	var out []tabs.SavedTab
+	for _, t := range p.group.Tabs {
+		if !t.Pinned {
+			continue
+		}
+		content, ok := t.Widget.(tabContent)
+		if !ok {
+			continue
+		}
+		st := tabs.SavedTab{Kind: t.Kind, Name: t.Name, Pinned: true}
+		if content.filePane != nil {
+			st.Path = content.filePane.Path()
+		}
+		out = append(out, st)
+	}
+	return out
 }
