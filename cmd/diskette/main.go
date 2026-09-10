@@ -36,7 +36,19 @@ import (
 // their own meaning.
 var navAccent = Graphite.Hex("#5DE4FF")
 
+// main dispatches to the CLI (a `diskette view`/`sync`/`tag`/`untag`/
+// `select` invoked from inside one of this program's own Terminal tabs —
+// see cli.go) before ever touching the TUI, so that second invocation of
+// this same binary exits immediately instead of trying to open a nested
+// full-screen instance inside its own terminal.
 func main() {
+	if code, handled := runCLI(os.Args[1:]); handled {
+		os.Exit(code)
+	}
+	runTUI()
+}
+
+func runTUI() {
 	start, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "diskette:", err)
@@ -51,7 +63,6 @@ func main() {
 
 	leftTabs := newPaneTabs(app, fs)
 	rightTabs := newPaneTabs(app, fs)
-	restoreSavedTabs(leftTabs, rightTabs, start)
 
 	activeGroup := func() *paneTabs {
 		if rightTabs.HasFocus() {
@@ -65,6 +76,25 @@ func main() {
 		}
 		return leftTabs
 	}
+
+	// The IPC server needs otherGroup to resolve "the other pane" for an
+	// incoming request, so it starts here rather than any earlier — and
+	// restoreSavedTabs (which can itself spawn a pinned Terminal tab) has
+	// to wait for it, so that tab gets working DISKETTE_IPC/TERMINAL_ID
+	// env vars too rather than ones pointing nowhere. A failure here
+	// (the loopback interface unavailable, astonishingly rare) disables
+	// `diskette view`/`sync`/`tag` rather than the whole program — every
+	// Terminal tab just won't have those env vars set, which cliView/
+	// cliSync/cliTagging already treat as an ordinary, reported error.
+	ipcReg := newTerminalRegistry()
+	ipcAddr, ipcErr := startIPCServer(app, ipcReg, otherGroup)
+	if ipcErr != nil {
+		fmt.Fprintln(os.Stderr, "diskette: terminal integration (view/sync/tag) unavailable:", ipcErr)
+	}
+	leftTabs.ipcTermRegistry, leftTabs.ipcAddr = ipcReg, ipcAddr
+	rightTabs.ipcTermRegistry, rightTabs.ipcAddr = ipcReg, ipcAddr
+
+	restoreSavedTabs(leftTabs, rightTabs, start)
 	// withActiveFilePane wraps an action that only makes sense against a
 	// FileList tab (rename, copy, delete, ...) so every F-key/menu
 	// callsite doesn't have to repeat the "is the active tab even a file
@@ -231,11 +261,14 @@ func newNavRow(app *Graphite.Application, fp *filepane.FilePane) *Graphite.Flex 
 // FilePane wrapped in its own nav-row Flex; for a Terminal tab, terminal
 // and display are the same bare *Graphite.Terminal. Kept as two named
 // fields rather than a type switch on display everywhere a caller needs
-// the concrete widget back.
+// the concrete widget back. id is only set for a Terminal tab — its
+// terminalRegistry key (see ipc.go), needed so CloseTabAt can unregister
+// it.
 type tabContent struct {
 	filePane *filepane.FilePane
 	terminal *Graphite.Terminal
 	display  Graphite.Widget
+	id       string
 }
 
 // focusable returns the one widget within this content that's actually
@@ -263,13 +296,45 @@ func newFileListContent(app *Graphite.Application, fs vfs.FileSystem, path strin
 	return tabContent{filePane: fp, display: col}
 }
 
-// newTerminalContent spawns a fresh shell in a new Terminal tab.
-func newTerminalContent(app *Graphite.Application) (tabContent, error) {
-	term, err := Graphite.NewTerminal(app, 0, 0, 0, 0, defaultShell(), nil)
+// newTerminalContent spawns a fresh shell in a new Terminal tab, with
+// DISKETTE_IPC/DISKETTE_TERMINAL_ID/DISKETTE_SHELL_KIND set in its
+// environment first (see cli.go/ipc.go) so `diskette view`/`sync`/`tag`
+// run inside it can reach back into this diskette instance. Setting
+// os.Setenv on the whole process rather than passing a per-child
+// environment works because every Terminal spawn — here and everywhere
+// else this is called from — happens on the main goroutine, so there's
+// no concurrent access to race; startPTY (graphite's pty.go) captures
+// os.Environ() synchronously inside this same call, on both Unix
+// (appended explicitly) and Windows (CreateProcess's nil environment
+// means "inherit the caller's").
+func newTerminalContent(app *Graphite.Application, ipcAddr string) (tabContent, error) {
+	shell := defaultShell()
+	id := newTerminalID()
+
+	os.Setenv("DISKETTE_IPC", ipcAddr)
+	os.Setenv("DISKETTE_TERMINAL_ID", id)
+	os.Setenv("DISKETTE_SHELL_KIND", shellKindOf(shell))
+
+	term, err := Graphite.NewTerminal(app, 0, 0, 0, 0, shell, nil)
 	if err != nil {
 		return tabContent{}, err
 	}
-	return tabContent{terminal: term, display: term}, nil
+	return tabContent{terminal: term, display: term, id: id}, nil
+}
+
+// shellKindOf identifies which of the shells diskette sync knows how to
+// hook (see cli.go's syncSnippet) shellPath is — "" for anything else,
+// which cliSync reports as an honest "not supported yet" rather than
+// guessing wrong and installing a broken hook.
+func shellKindOf(shellPath string) string {
+	switch {
+	case looksLikeShellPath(shellPath, "zsh"):
+		return "zsh"
+	case looksLikeShellPath(shellPath, "bash"):
+		return "bash"
+	default:
+		return ""
+	}
 }
 
 // tabName returns a FileList tab's display name (the directory's own base
@@ -307,6 +372,17 @@ type paneTabs struct {
 	// at startup already has.
 	onSearchChanged func()
 	onFileListFKey  func(*filepane.FilePane) func(Graphite.KeyCode)
+
+	// ipcTermRegistry/ipcAddr let AddTerminal register each Terminal tab
+	// it spawns (and CloseTabAt unregister it again) so `diskette view`/
+	// `sync`/`tag` run inside one can reach back into this instance — see
+	// ipc.go. Both are set once, right after construction, once main()
+	// has started the IPC server (which itself needs otherGroup, which in
+	// turn needs leftTabs/rightTabs to already exist — an ordering this
+	// project's other setUp-then-wire fields, like onSearchChanged, share
+	// too).
+	ipcTermRegistry *terminalRegistry
+	ipcAddr         string
 
 	tabRects []tabRect // recomputed every DrawRelative; used by HandleEvent
 }
@@ -360,9 +436,12 @@ func (p *paneTabs) AddFileList(path string) {
 // not something to silently swallow).
 func (p *paneTabs) AddTerminal() error {
 	wasFocused := p.HasFocus()
-	content, err := newTerminalContent(p.app)
+	content, err := newTerminalContent(p.app, p.ipcAddr)
 	if err != nil {
 		return err
+	}
+	if p.ipcTermRegistry != nil {
+		p.ipcTermRegistry.register(content.id, p)
 	}
 	p.group.Add(&tabs.Tab{Kind: tabs.Terminal, Name: tabName(tabs.Terminal, ""), Widget: content})
 	if wasFocused {
@@ -394,8 +473,12 @@ func (p *paneTabs) SwitchTo(idx int) {
 // when closing the active tab moves it to a different one.
 func (p *paneTabs) CloseTabAt(idx int) bool {
 	wasFocused := p.HasFocus()
+	closing, hadContent := p.contentAt(idx)
 	if !p.group.Close(idx) {
 		return false
+	}
+	if hadContent && closing.id != "" && p.ipcTermRegistry != nil {
+		p.ipcTermRegistry.unregister(closing.id)
 	}
 	if wasFocused {
 		if c, ok := p.contentAt(p.group.Active); ok {
