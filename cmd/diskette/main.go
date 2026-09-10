@@ -26,6 +26,7 @@ import (
 	"github.com/yeoblyv/diskette/internal/openwith"
 	"github.com/yeoblyv/diskette/internal/roots"
 	"github.com/yeoblyv/diskette/internal/search"
+	"github.com/yeoblyv/diskette/internal/sftpfs"
 	"github.com/yeoblyv/diskette/internal/tabs"
 	"github.com/yeoblyv/diskette/internal/theme"
 	"github.com/yeoblyv/diskette/internal/vfs"
@@ -150,12 +151,16 @@ func runTUI() {
 		if !ok {
 			return statusBarState{}
 		}
-		usage, err := diskspace.Query(fp.Path())
 		count, size, hasTagged := fp.TaggedSummary()
-		return statusBarState{
-			usage:       diskUsageCache{usage: usage, ok: err == nil},
+		state := statusBarState{
 			taggedCount: count, taggedSize: size, hasTagged: hasTagged,
+			remoteLabel: group.ActiveRemoteLabel(),
 		}
+		if _, isLocal := fp.FS.(vfs.LocalFS); isLocal {
+			usage, err := diskspace.Query(fp.Path())
+			state.usage = diskUsageCache{usage: usage, ok: err == nil}
+		}
+		return state
 	})
 
 	win.AddWidget(mainRow)
@@ -252,7 +257,16 @@ func newNavRow(app *Graphite.Application, fp *filepane.FilePane) *Graphite.Flex 
 	row.Gap = 1
 	row.AddChild(newNavButton("<", func() { fp.Back() }), 0)
 	row.AddChild(newNavButton(">", func() { fp.Forward() }), 0)
-	row.AddChild(newNavButton("Root", func() { promptChooseRoot(app, fp) }), 0)
+	row.AddChild(newNavButton("Root", func() {
+		if _, ok := fp.FS.(vfs.LocalFS); ok {
+			promptChooseRoot(app, fp)
+		} else {
+			// A remote server has exactly one root — no drives/volumes
+			// picker (internal/roots) makes sense for it, and that
+			// picker is unconditionally local anyway.
+			fp.SetPath("/")
+		}
+	}), 0)
 	row.AddChild(newPathBar(app, fp), 1)
 	return row
 }
@@ -265,12 +279,27 @@ func newNavRow(app *Graphite.Application, fp *filepane.FilePane) *Graphite.Flex 
 // fields rather than a type switch on display everywhere a caller needs
 // the concrete widget back. id is only set for a Terminal tab — its
 // terminalRegistry key (see ipc.go), needed so CloseTabAt can unregister
-// it.
+// it. remote is set only for a Remote tab (still a FilePane under
+// filePane — Remote is "a FileList backed by a different vfs.FileSystem",
+// not a different display) — its SFTP session and the metadata needed to
+// persist/reconnect it.
 type tabContent struct {
 	filePane *filepane.FilePane
 	terminal *Graphite.Terminal
 	display  Graphite.Widget
 	id       string
+	remote   *connectedRemote
+}
+
+// connectedRemote is a Remote tab's live SFTP session plus the connection
+// metadata pinnedOf persists (see internal/tabs.SavedRemote) — everything
+// needed to show it in the status bar, close it when the tab closes or
+// the app quits, and offer a pre-filled reconnect on restart, but never
+// its password/passphrase.
+type connectedRemote struct {
+	label string // "user@host", for the tab name and status bar
+	fs    *sftpfs.SFTPFS
+	meta  tabs.SavedRemote
 }
 
 // focusable returns the one widget within this content that's actually
@@ -289,7 +318,13 @@ func (c tabContent) focusable() Graphite.Widget {
 // always has been.
 func newFileListContent(app *Graphite.Application, fs vfs.FileSystem, path string) tabContent {
 	fp := filepane.New(0, 0, 0, 0, fs, path)
-	fp.OnOpenFile = func(p string) { openFile(app, p) }
+	fp.OnOpenFile = func(p string) {
+		if _, ok := fs.(vfs.LocalFS); !ok {
+			app.ShowMessage(" Error ", "Opening a remote file isn't supported yet.", Graphite.BtnDanger)
+			return
+		}
+		openFile(app, p)
+	}
 
 	col := Graphite.NewFlex(0, 0, 0, 0, Graphite.FlexColumn)
 	col.AddChild(newNavRow(app, fp), 0)
@@ -657,6 +692,23 @@ func (p *paneTabs) AddTerminal() error {
 	return nil
 }
 
+// AddRemote adds a new Remote tab — a FileList backed by fs (an already-
+// connected *sftpfs.SFTPFS) instead of this pane's own local p.fs — and
+// switches to it, the same way AddFileList/AddTerminal do. Deliberately
+// bypasses p.fs entirely rather than reusing AddFileList: p.fs is one
+// value shared by every local FileList tab on this pane, fixed to
+// vfs.LocalFS, and was never meant to change per-tab.
+func (p *paneTabs) AddRemote(fs *sftpfs.SFTPFS, path, label string, meta tabs.SavedRemote) {
+	wasFocused := p.HasFocus()
+	content := newFileListContent(p.app, fs, path)
+	p.wireFileList(content.filePane)
+	content.remote = &connectedRemote{label: label, fs: fs, meta: meta}
+	p.group.Add(&tabs.Tab{Kind: tabs.Remote, Name: label, Widget: content})
+	if wasFocused {
+		content.focusable().SetFocus(true)
+	}
+}
+
 // SwitchTo makes the tab at idx active, moving keyboard focus to its
 // content if this pane already had focus (so switching tabs in the pane
 // you're already working in doesn't silently kick focus to the other
@@ -686,6 +738,9 @@ func (p *paneTabs) CloseTabAt(idx int) bool {
 	}
 	if hadContent && closing.id != "" && p.ipcTermRegistry != nil {
 		p.ipcTermRegistry.unregister(closing.id)
+	}
+	if hadContent && closing.remote != nil {
+		closing.remote.fs.Close()
 	}
 	if wasFocused {
 		if c, ok := p.contentAt(p.group.Active); ok {
@@ -727,6 +782,16 @@ func (p *paneTabs) ActiveTerminal() (*Graphite.Terminal, bool) {
 		return nil, false
 	}
 	return c.terminal, true
+}
+
+// ActiveRemoteLabel returns the active tab's "user@host" label, or "" if
+// it isn't a Remote tab — for diskSpaceBar's third segment.
+func (p *paneTabs) ActiveRemoteLabel() string {
+	c, ok := p.activeContent()
+	if !ok || c.remote == nil {
+		return ""
+	}
+	return c.remote.label
 }
 
 // HasFocus overrides BaseWidget.HasFocus: paneTabs itself is never the
@@ -954,23 +1019,27 @@ type diskUsageCache struct {
 
 // statusBarState is one frame's worth of everything the bottom status row
 // needs: the tagged-selection summary for whichever pane is focused, and
-// that pane's disk usage. Both are the zero value when the focused pane's
-// active tab is a Terminal rather than a FileList — there is nothing
-// file-related to report on.
+// that pane's disk usage, and remoteLabel (e.g. "me@example.com") for the
+// third segment when the focused pane's active tab is a Remote FileList —
+// empty means "Local". usage/taggedCount/taggedSize/hasTagged are all the
+// zero value when the active tab is a Terminal (nothing file-related to
+// report) or a Remote FileList (disk usage is a local-filesystem-only
+// query — internal/diskspace.Query — that doesn't mean anything for an
+// SFTP path; only tagging still applies there).
 type statusBarState struct {
 	usage       diskUsageCache
 	taggedCount int
 	taggedSize  int64
 	hasTagged   bool
+	remoteLabel string
 }
 
 // diskSpaceBar is the full-width row above the F-key bar, split into three
 // parts separated by "│": tagged-selection size, a disk usage progress
-// bar, and a third segment reserved for remote-connection status once a
-// server pane exists (Phase 2) — shown as "Local" for now rather than
-// left blank, since local-only is the accurate current state, not an
-// unfinished one. state is read fresh every frame (see dirButton for why:
-// there is no "focus changed" hook to update from instead).
+// bar, and a third segment showing "Local" or, for a Remote tab, its
+// "user@host" label (see statusBarState.remoteLabel). state is read fresh
+// every frame (see dirButton for why: there is no "focus changed" hook to
+// update from instead).
 type diskSpaceBar struct {
 	Graphite.BaseWidget
 	state func() statusBarState
@@ -1038,10 +1107,11 @@ func (d *diskSpaceBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) 
 	dividerX2 := diskX + diskSegW
 	c.DrawCell(dividerX2, d.AbsY, "│", theme.BgWindow, theme.FgDisabled)
 
-	// Reserved for remote-connection status once a server pane exists
-	// (see the project's SFTP phase) — "Local" is accurate today, not a
-	// placeholder pretending to be a real connection indicator.
-	c.DrawTextBounded(dividerX2+1, d.AbsY, serverSegW-1, "Server: Local", theme.BgWindow, theme.FgDisabled)
+	serverText := "Server: Local"
+	if state.remoteLabel != "" {
+		serverText = "Server: " + state.remoteLabel
+	}
+	c.DrawTextBounded(dividerX2+1, d.AbsY, serverSegW-1, serverText, theme.BgWindow, theme.FgDisabled)
 }
 
 // drawDiskSegment resolves state itself, for the narrow-terminal fallback
@@ -1170,6 +1240,9 @@ func newMenuStrip(app *Graphite.Application, left, right *paneTabs, active func(
 						app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
 					}
 				}},
+				{Label: "Connect to server...", Action: func() {
+					showConnectDialog(app, active(), nil, nil)
+				}},
 			}},
 			{Separator: true},
 			{Label: "Pin/Unpin Tab", Action: func() { active().group.TogglePin(active().group.Active) }},
@@ -1205,6 +1278,8 @@ func mustGetwd() string {
 func requestQuit(app *Graphite.Application, left, right *paneTabs) {
 	Graphite.ShowConfirm(app, " Quit ", "Quit Diskette?", Graphite.BtnDanger, func() {
 		saveTabs(left, right)
+		closeRemoteTabs(left)
+		closeRemoteTabs(right)
 		if cliShim.dir != "" {
 			os.RemoveAll(cliShim.dir)
 		}
@@ -1216,6 +1291,18 @@ func requestQuit(app *Graphite.Application, left, right *paneTabs) {
 		}
 		app.Quit()
 	})
+}
+
+// closeRemoteTabs closes the SFTP session behind every Remote tab still
+// open on p, called before quitting — mirrors CloseTabAt's own cleanup
+// for a tab closed one at a time, since quitting never goes through
+// CloseTabAt for the tabs still open when it happens.
+func closeRemoteTabs(p *paneTabs) {
+	for _, t := range p.group.Tabs {
+		if c, ok := t.Widget.(tabContent); ok && c.remote != nil {
+			c.remote.fs.Close()
+		}
+	}
 }
 
 // showAbout opens a custom modal: the logo (internal/assets.DisketteLogo,
@@ -1877,6 +1964,7 @@ func restoreSavedTabs(left, right *paneTabs, start string) {
 }
 
 func restoreSide(p *paneTabs, saved []tabs.SavedTab, active int, start string) {
+	pendingRemotes := 0
 	for _, st := range saved {
 		switch st.Kind {
 		case tabs.Terminal:
@@ -1884,6 +1972,23 @@ func restoreSide(p *paneTabs, saved []tabs.SavedTab, active int, start string) {
 				p.group.Tabs[len(p.group.Tabs)-1].Pinned = true
 				p.group.Tabs[len(p.group.Tabs)-1].Name = st.Name
 			}
+		case tabs.Remote:
+			// No stored password to reconnect with — a pre-filled
+			// Connect dialog per the project owner's own choice, not an
+			// automatic reconnect. Nothing is added to p.group.Tabs
+			// until (and unless) the user finishes it; showConnectDialog
+			// itself pins the resulting tab and restores its saved name
+			// via onConnected, since AddRemote alone doesn't know this
+			// is a restore rather than a fresh connection.
+			if st.Remote == nil {
+				continue
+			}
+			pendingRemotes++
+			meta, name := *st.Remote, st.Name
+			showConnectDialog(p.app, p, &meta, func() {
+				p.group.Tabs[len(p.group.Tabs)-1].Pinned = true
+				p.group.Tabs[len(p.group.Tabs)-1].Name = name
+			})
 		default:
 			path := st.Path
 			if _, err := os.Stat(path); err != nil {
@@ -1894,7 +1999,7 @@ func restoreSide(p *paneTabs, saved []tabs.SavedTab, active int, start string) {
 			p.group.Tabs[len(p.group.Tabs)-1].Name = st.Name
 		}
 	}
-	if len(p.group.Tabs) == 0 {
+	if len(p.group.Tabs) == 0 && pendingRemotes == 0 {
 		p.AddFileList(start)
 		return
 	}
@@ -1926,7 +2031,10 @@ func pinnedOf(p *paneTabs) []tabs.SavedTab {
 			continue
 		}
 		st := tabs.SavedTab{Kind: t.Kind, Name: t.Name, Pinned: true}
-		if content.filePane != nil {
+		if content.remote != nil {
+			meta := content.remote.meta
+			st.Remote = &meta
+		} else if content.filePane != nil {
 			st.Path = content.filePane.Path()
 		}
 		out = append(out, st)
