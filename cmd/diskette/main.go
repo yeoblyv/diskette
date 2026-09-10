@@ -9,9 +9,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	Graphite "github.com/yeoblyv/graphite"
@@ -199,8 +201,31 @@ func runTUI() {
 	rightTabs.onFileListFKey = fKeyHandler
 
 	app.SetOnQuitRequested(func() { requestQuit(app, leftTabs, rightTabs) })
+	installSignalSaveHandler(app, leftTabs, rightTabs)
 	app.SetWindow(win)
 	app.Run()
+}
+
+// installSignalSaveHandler makes SIGINT/SIGTERM/SIGHUP save pinned tabs
+// and clean up before the process actually dies, the same way a
+// confirmed F10/Escape quit already does — closing the terminal window
+// diskette is running in, a plain Ctrl+C, or a `kill` all bypass
+// requestQuit's confirmation entirely, and previously bypassed saving
+// pinned tabs right along with it: nothing pinned in that session ever
+// made it to disk, no matter how carefully it was pinned, because the
+// save step itself never ran. Signal delivery in Go doesn't wait for the
+// main goroutine to be idle (it's handled on a runtime-owned thread), so
+// this fires promptly even while the main loop is blocked reading
+// terminal input — saveAndQuit itself must still run on the main loop via
+// app.Invoke, since it touches the same tab/widget state the main loop
+// reads and writes without any locking of its own.
+func installSignalSaveHandler(app *Graphite.Application, left, right *paneTabs) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sig
+		app.Invoke(func() { saveAndQuit(app, left, right) })
+	}()
 }
 
 // defaultShell picks the interactive shell a new Terminal tab spawns:
@@ -1292,20 +1317,32 @@ func mustGetwd() string {
 // even for a quit the user didn't cancel out of.
 func requestQuit(app *Graphite.Application, left, right *paneTabs) {
 	Graphite.ShowConfirm(app, " Quit ", "Quit Diskette?", Graphite.BtnDanger, func() {
-		saveTabs(left, right)
-		closeRemoteTabs(left)
-		closeRemoteTabs(right)
-		if cliShim.dir != "" {
-			os.RemoveAll(cliShim.dir)
-		}
-		if zshSyncShim.dir != "" {
-			os.RemoveAll(zshSyncShim.dir)
-		}
-		if bashSyncShim.path != "" {
-			os.RemoveAll(filepath.Dir(bashSyncShim.path))
-		}
-		app.Quit()
+		saveAndQuit(app, left, right)
 	})
+}
+
+// saveAndQuit does everything a shutdown needs regardless of how it was
+// triggered — the confirmed Quit dialog, or runTUI's own SIGINT/SIGTERM
+// handler for a terminal window closing or a plain Ctrl+C, neither of
+// which goes through requestQuit's confirmation at all. Saving pinned
+// tabs only on the confirmed path (as this used to) meant closing the
+// terminal window instead of using F10/Escape silently skipped it —
+// tabs.Save never ran, so nothing was there to restore next launch
+// regardless of what was pinned.
+func saveAndQuit(app *Graphite.Application, left, right *paneTabs) {
+	saveTabs(left, right)
+	closeRemoteTabs(left)
+	closeRemoteTabs(right)
+	if cliShim.dir != "" {
+		os.RemoveAll(cliShim.dir)
+	}
+	if zshSyncShim.dir != "" {
+		os.RemoveAll(zshSyncShim.dir)
+	}
+	if bashSyncShim.path != "" {
+		os.RemoveAll(filepath.Dir(bashSyncShim.path))
+	}
+	app.Quit()
 }
 
 // closeRemoteTabs closes the SFTP session behind every Remote tab still
