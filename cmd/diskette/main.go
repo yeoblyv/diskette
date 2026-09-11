@@ -1396,7 +1396,7 @@ func showAbout(app *Graphite.Application) {
 			"lightweight Graphite TUI framework.\n\n"+
 			"Copyright © 2026 Yehor Oblyvantsov\n"+
 			"github.com/yeoblyv/diskette\n\n"+
-			"Development build.")
+			"Beta release.")
 	info.Width = 44
 	mod.AddWidget(info)
 
