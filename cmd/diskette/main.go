@@ -1251,19 +1251,29 @@ func newMenuStrip(app *Graphite.Application, left, right *paneTabs, active func(
 			{Label: "Rename        F2", Action: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
 			{Label: "Find          F3", Action: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
 			{Label: "Edit          F4", Action: withFP(func(fp *filepane.FilePane) { doEdit(app, fp) })},
+			{Separator: true},
 			{Label: "Copy          F5", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
 			{Label: "Move          F6", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
+			{Separator: true},
+			{Label: "New File", Action: withFP(func(fp *filepane.FilePane) { doNewFile(app, fp) })},
 			{Label: "New Folder    F7", Action: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
 			{Label: "Delete        F8", Action: withFP(func(fp *filepane.FilePane) { doDelete(app, fp) })},
+			{Separator: true},
 			{Label: "Quit         F10", Action: func() { requestQuit(app, left, right) }},
 		}},
 		{Label: "Mark", Items: []Graphite.MenuItem{
 			{Label: "Tag/Untag    Ins", Action: withFP(func(fp *filepane.FilePane) { fp.ToggleTag() })},
+			{Separator: true},
+			{Label: "Select All", Action: withFP(func(fp *filepane.FilePane) { fp.SelectAll() })},
+			{Label: "Deselect All", Action: withFP(func(fp *filepane.FilePane) { fp.DeselectAll() })},
+			{Label: "Invert Selection", Action: withFP(func(fp *filepane.FilePane) { fp.InvertSelection() })},
 		}},
 		{Label: "View", Items: []Graphite.MenuItem{
 			{Label: "Sort by Name", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByName) })},
+			{Label: "Sort by Extension", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByExt) })},
 			{Label: "Sort by Size", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortBySize) })},
 			{Label: "Sort by Date", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByDate) })},
+			{Separator: true},
 			{Label: "Refresh", Action: withFP(func(fp *filepane.FilePane) { fp.Reload() })},
 		}},
 		{Label: "Tab", Items: []Graphite.MenuItem{
@@ -1779,6 +1789,38 @@ func doRename(app *Graphite.Application, fp *filepane.FilePane) {
 			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
 		}
 		fp.Reload()
+	})
+}
+
+// doNewFile implements "New File": create an empty file inside fp's
+// current directory, then immediately open it for editing — the same
+// create-and-edit-in-one-step convention classic commanders use, rather
+// than leaving the user to separately find and open what they just
+// created. Refuses to proceed if the name already exists, since
+// fp.FS.Create truncates unconditionally (unlike Mkdir, which already
+// errors on its own for an existing path) — silently emptying an
+// existing file just because its name was reused would be a real way to
+// lose data.
+func doNewFile(app *Graphite.Application, fp *filepane.FilePane) {
+	Graphite.ShowTextEditor(app, " New file ", "Name:", "", func(name string) {
+		ctx := context.Background()
+		path := fp.FS.Join(fp.Path(), name)
+		if _, err := fp.FS.Stat(ctx, path); err == nil {
+			app.ShowMessage(" Error ", "A file or folder named \""+name+"\" already exists.", Graphite.BtnDanger)
+			return
+		}
+		w, err := fp.FS.Create(ctx, path)
+		if err != nil {
+			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+			return
+		}
+		if err := w.Close(); err != nil {
+			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+			return
+		}
+		fp.Reload()
+		fp.SelectByName(name)
+		doEdit(app, fp)
 	})
 }
 

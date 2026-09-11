@@ -793,3 +793,76 @@ func TestFilePane_DrawRelativeDoesNotPanicAndPaintsHeader(t *testing.T) {
 	// visible row via column-width arithmetic that's easy to get
 	// off-by-one on.
 }
+
+func TestFilePane_SelectAllTagsEveryEntryButNotTheParentRow(t *testing.T) {
+	fp, _ := newTestPane(t)
+
+	fp.SelectAll()
+
+	count, _, hasTagged := fp.TaggedSummary()
+	if !hasTagged || count != 3 { // sub, a.txt, b.txt — not ".."
+		t.Errorf("TaggedSummary() = (%d, hasTagged=%v), want (3, true)", count, hasTagged)
+	}
+	for _, r := range fp.rows {
+		if r.isParent && r.tagged {
+			t.Error("SelectAll tagged the \"..\" row")
+		}
+	}
+}
+
+func TestFilePane_DeselectAllClearsEveryTag(t *testing.T) {
+	fp, _ := newTestPane(t)
+	fp.SelectAll()
+
+	fp.DeselectAll()
+
+	if _, _, hasTagged := fp.TaggedSummary(); hasTagged {
+		t.Error("still tagged after DeselectAll")
+	}
+}
+
+func TestFilePane_InvertSelectionFlipsEveryEntryButNotTheParentRow(t *testing.T) {
+	fp, _ := newTestPane(t)
+	if !fp.SetTagByName("a.txt", true) {
+		t.Fatal("SetTagByName(\"a.txt\", true) = false")
+	}
+
+	fp.InvertSelection()
+
+	count, _, hasTagged := fp.TaggedSummary()
+	if !hasTagged || count != 2 { // sub and b.txt now tagged, a.txt no longer
+		t.Errorf("TaggedSummary() = (%d, hasTagged=%v), want (2, true)", count, hasTagged)
+	}
+	for _, r := range fp.rows {
+		if r.Name == "a.txt" && r.tagged {
+			t.Error("a.txt still tagged after InvertSelection, want untagged")
+		}
+		if r.isParent && r.tagged {
+			t.Error("InvertSelection tagged the \"..\" row")
+		}
+	}
+}
+
+func TestFilePane_SortByExt(t *testing.T) {
+	fp, dir := newTestPane(t)
+	mustWriteFile(t, filepath.Join(dir, "c.md"), "markdown")
+	fp.Reload()
+
+	fp.SetSort(SortByExt)
+	if fp.sortField != SortByExt {
+		t.Fatalf("SetSort(SortByExt): sortField = %v, want SortByExt", fp.sortField)
+	}
+
+	// Directories still sort before files regardless of field, so "sub"
+	// leads; among files, "c.md" ("md") sorts before "a.txt"/"b.txt"
+	// ("txt").
+	var order []string
+	for _, r := range fp.rows {
+		if !r.isParent {
+			order = append(order, r.Name)
+		}
+	}
+	if len(order) != 4 || order[0] != "sub" || order[1] != "c.md" {
+		t.Errorf("order after SortByExt = %v, want [sub c.md a.txt b.txt] (a.txt/b.txt in either order, same ext)", order)
+	}
+}

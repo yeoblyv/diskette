@@ -45,6 +45,7 @@ const (
 	SortByName SortField = iota
 	SortBySize
 	SortByDate
+	SortByExt
 )
 
 // row is one visible line: either a real filesystem entry or the synthetic
@@ -324,6 +325,33 @@ func (fp *FilePane) SetFound(name string) {
 // menu item, say) can trigger the same tagging gesture Insert does.
 func (fp *FilePane) ToggleTag() { fp.toggleTagAndAdvance() }
 
+// SelectAll tags every entry except the ".." row.
+func (fp *FilePane) SelectAll() {
+	for i := range fp.rows {
+		if !fp.rows[i].isParent {
+			fp.rows[i].tagged = true
+		}
+	}
+}
+
+// DeselectAll untags every entry.
+func (fp *FilePane) DeselectAll() {
+	for i := range fp.rows {
+		fp.rows[i].tagged = false
+	}
+}
+
+// InvertSelection flips the tagged state of every entry except the ".."
+// row — a tagged entry becomes untagged and vice versa, the classic
+// commander "select the complement" gesture.
+func (fp *FilePane) InvertSelection() {
+	for i := range fp.rows {
+		if !fp.rows[i].isParent {
+			fp.rows[i].tagged = !fp.rows[i].tagged
+		}
+	}
+}
+
 // SetSort changes the sort field, toggling direction if field is already
 // active, and re-sorts in place — exported so a host program's own UI (a
 // menu item, say) can trigger the same sort change clicking a column
@@ -461,6 +489,10 @@ func (fp *FilePane) sortRows() {
 
 		cmp := 0
 		switch fp.sortField {
+		case SortByExt:
+			_, aExt := splitExt(a.Name)
+			_, bExt := splitExt(b.Name)
+			cmp = strings.Compare(aExt, bExt)
 		case SortBySize:
 			switch {
 			case a.Size < b.Size:
@@ -750,6 +782,8 @@ func (fp *FilePane) handleHeaderClick(relX int) {
 	switch {
 	case relX < l.nameW:
 		fp.setSort(SortByName)
+	case l.extX >= 0 && relX < l.extX+extColWidth:
+		fp.setSort(SortByExt)
 	case l.sizeX >= 0 && relX < l.sizeX+sizeColWidth:
 		fp.setSort(SortBySize)
 	case l.dateX >= 0 && relX < l.dateX+dateColWidth:
@@ -796,7 +830,7 @@ func (fp *FilePane) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 	}
 	c.DrawTextBounded(fp.AbsX, fp.AbsY, l.nameW, sortLabel("Name", fp.sortField == SortByName, fp.sortDesc), headerBg, fgDim)
 	if l.extX >= 0 {
-		c.DrawTextBounded(fp.AbsX+l.extX, fp.AbsY, extColWidth, "Ext", headerBg, fgDim)
+		c.DrawTextBounded(fp.AbsX+l.extX, fp.AbsY, extColWidth, sortLabel("Ext", fp.sortField == SortByExt, fp.sortDesc), headerBg, fgDim)
 	}
 	if l.sizeX >= 0 {
 		c.DrawTextBounded(fp.AbsX+l.sizeX, fp.AbsY, sizeColWidth, sortLabel("Size", fp.sortField == SortBySize, fp.sortDesc), headerBg, fgDim)
