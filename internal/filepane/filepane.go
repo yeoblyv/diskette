@@ -113,7 +113,7 @@ type FilePane struct {
 	// OnOpenFile, if set, is called with a row's full path when Enter or a
 	// double-click activates a regular file (not a directory or the ".."
 	// row) — the host program's hook for launching it in the OS's
-	// associated default application, distinct from F3/F4's $PAGER/$EDITOR.
+	// associated default application.
 	OnOpenFile func(path string)
 }
 

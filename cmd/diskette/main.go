@@ -8,9 +8,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -27,6 +25,7 @@ import (
 	"github.com/yeoblyv/diskette/internal/fileinfo"
 	"github.com/yeoblyv/diskette/internal/filepane"
 	"github.com/yeoblyv/diskette/internal/fkeybar"
+	"github.com/yeoblyv/diskette/internal/grep"
 	"github.com/yeoblyv/diskette/internal/openwith"
 	"github.com/yeoblyv/diskette/internal/roots"
 	"github.com/yeoblyv/diskette/internal/search"
@@ -183,7 +182,7 @@ func runTUI() {
 			case Graphite.KeyF3:
 				showFindFiles(app, fp)
 			case Graphite.KeyF4:
-				doEdit(app, fp)
+				showGrepSearch(app, fp)
 			case Graphite.KeyF5:
 				if dst, ok := otherGroup(activeGroup()).ActiveFilePane(); ok {
 					doCopyOrMove(app, fp, dst, false)
@@ -1214,7 +1213,7 @@ func newFKeyBar(app *Graphite.Application, right *paneTabs, withFP func(func(*fi
 		{Label: "F1", Text: "Info", OnClick: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
 		{Label: "F2", Text: "Rename", OnClick: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
 		{Label: "F3", Text: "Find", OnClick: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
-		{Label: "F4", Text: "Edit", OnClick: withFP(func(fp *filepane.FilePane) { doEdit(app, fp) })},
+		{Label: "F4", Text: "Grep", OnClick: withFP(func(fp *filepane.FilePane) { showGrepSearch(app, fp) })},
 		{Label: "F5", Text: "Copy Right", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
 		{Label: "F6", Text: "Move Right", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
 		{Label: "F7", Text: "MkDir", OnClick: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
@@ -1250,7 +1249,7 @@ func newMenuStrip(app *Graphite.Application, left, right *paneTabs, active func(
 			{Label: "File Info     F1", Action: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
 			{Label: "Rename        F2", Action: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
 			{Label: "Find          F3", Action: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
-			{Label: "Edit          F4", Action: withFP(func(fp *filepane.FilePane) { doEdit(app, fp) })},
+			{Label: "Grep          F4", Action: withFP(func(fp *filepane.FilePane) { showGrepSearch(app, fp) })},
 			{Separator: true},
 			{Label: "Copy          F5", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
 			{Label: "Move          F6", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
@@ -1553,6 +1552,122 @@ func runFileSearch(app *Graphite.Application, fp *filepane.FilePane, opts search
 	}()
 }
 
+// showGrepSearch implements F4: a grep-style search of file contents,
+// prompting for a pattern (literal or regular expression), an optional
+// name mask to restrict which files are searched, and the same
+// recurse/case-sensitive choices showFindFiles offers.
+func showGrepSearch(app *Graphite.Application, fp *filepane.FilePane) {
+	mod := Graphite.NewWindow(60, 16, " Grep ")
+
+	rootInput := Graphite.NewInputBox(2, 1, 54, "Search in: ")
+	rootInput.Value = fp.Path()
+	mod.AddWidget(rootInput)
+
+	patternInput := Graphite.NewInputBox(2, 3, 54, "Pattern: ")
+	mod.AddWidget(patternInput)
+
+	maskInput := Graphite.NewInputBox(2, 5, 54, "Name mask: ")
+	maskInput.Value = "*"
+	mod.AddWidget(maskInput)
+
+	recurseBox := Graphite.NewCheckbox(2, 7, "Search subfolders", true)
+	mod.AddWidget(recurseBox)
+	caseBox := Graphite.NewCheckbox(2, 8, "Case sensitive", false)
+	mod.AddWidget(caseBox)
+	regexBox := Graphite.NewCheckbox(2, 9, "Regular expression", false)
+	mod.AddWidget(regexBox)
+
+	mod.AddWidget(Graphite.NewButton(2, -2, "Search", Graphite.BtnSuccess, func() {
+		if patternInput.Value == "" {
+			return
+		}
+		app.CloseModal()
+		runGrepSearch(app, fp, grep.Options{
+			Pattern:       patternInput.Value,
+			Regex:         regexBox.Checked,
+			CaseSensitive: caseBox.Checked,
+			Mask:          maskInput.Value,
+			Recursive:     recurseBox.Checked,
+		}, rootInput.Value)
+	}))
+	mod.AddWidget(Graphite.NewButton(14, -2, "Cancel", Graphite.BtnDefault, func() {
+		app.CloseModal()
+	}))
+
+	app.SetModal(mod)
+}
+
+// runGrepSearch runs opts against root in the background (so a large
+// tree doesn't freeze the UI) and shows results as they arrive in a
+// live-updating list, one per matching line; selecting one navigates fp
+// to that file the same way runFileSearch's results do.
+func runGrepSearch(app *Graphite.Application, fp *filepane.FilePane, opts grep.Options, root string) {
+	mod := Graphite.NewWindow(78, 20, " Grep ")
+	status := Graphite.NewLabel(2, 1, "Searching…")
+	mod.AddWidget(status)
+
+	// shown is only ever written from within app.Invoke and read from
+	// results' onSelect — both run on the UI goroutine — so it never
+	// touches the background goroutine below, which keeps its own
+	// unshared allMatches/allLines instead. That split avoids a data race
+	// that a single slice written by both goroutines would otherwise have.
+	var shown []grep.Match
+	results := Graphite.NewListBox(2, 3, -4, -4, nil, func(idx int, _ string) {
+		if idx < 0 || idx >= len(shown) {
+			return
+		}
+		m := shown[idx]
+		app.CloseModal()
+		dir, ok := fp.FS.Parent(m.Path)
+		if !ok {
+			return
+		}
+		name := trimLeadingSeparators(m.Path[len(dir):])
+		fp.SetPath(dir)
+		fp.SetFound(name)
+	})
+	mod.AddWidget(results)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
+		cancel()
+		app.CloseModal()
+	}))
+	app.SetModal(mod)
+
+	go func() {
+		var allMatches []grep.Match
+		var allLines []string
+		lastUpdate := time.Now()
+		flush := func(done bool) {
+			snapshotMatches := append([]grep.Match(nil), allMatches...)
+			snapshotLines := append([]string(nil), allLines...)
+			app.Invoke(func() {
+				shown = snapshotMatches
+				results.Items = snapshotLines
+				if done {
+					status.SetText(fmt.Sprintf("%d found", len(snapshotLines)))
+				} else {
+					status.SetText(fmt.Sprintf("Searching… %d found", len(snapshotLines)))
+				}
+			})
+		}
+
+		err := grep.Run(ctx, fp.FS, root, opts, func(m grep.Match) {
+			allMatches = append(allMatches, m)
+			allLines = append(allLines, fmt.Sprintf("%s:%d: %s", m.Path, m.LineNum, strings.TrimSpace(m.Line)))
+			if time.Since(lastUpdate) > 150*time.Millisecond {
+				flush(false)
+				lastUpdate = time.Now()
+			}
+		})
+		flush(true)
+		if err != nil && ctx.Err() == nil {
+			app.Invoke(func() { app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger) })
+		}
+	}()
+}
+
 // trimLeadingSeparators strips leading path separators, for turning the
 // suffix left after slicing a parent directory's length off a full path
 // into a bare entry name regardless of platform separator.
@@ -1649,132 +1764,6 @@ func promptChooseRoot(app *Graphite.Application, fp *filepane.FilePane) {
 	app.SetModal(mod)
 }
 
-// doEdit implements F4: opens the entry under the cursor in $VISUAL/
-// $EDITOR (falling back to a sensible per-OS default), suspending
-// diskette's own TUI rendering for the duration exactly like a shell
-// would before running an interactive program — see Graphite.Application's
-// own Suspend/Resume, built for exactly this and unused until now. A
-// local file is edited in place; a remote one (SFTP/FTP) has no path an
-// external editor could open directly, so it's downloaded to a temp file
-// first and re-uploaded once the editor exits.
-func doEdit(app *Graphite.Application, fp *filepane.FilePane) {
-	entry, ok := fp.Selected()
-	if !ok || entry.IsDir {
-		return
-	}
-	path := fp.FS.Join(fp.Path(), entry.Name)
-
-	if _, isLocal := fp.FS.(vfs.LocalFS); isLocal {
-		if runEditor(app, path) {
-			fp.Reload()
-		}
-		return
-	}
-	editRemoteFile(app, fp, path, entry.Name)
-}
-
-// editRemoteFile downloads path to a local temp file (its name keeps
-// name's own extension, so the editor's syntax highlighting still works),
-// edits it, and re-uploads it unconditionally once the editor exits —
-// reliably detecting "was this actually changed" across arbitrary
-// editors (some rewrite in place, some atomically swap in a new file)
-// isn't worth the fragility, and re-uploading identical content is
-// harmless.
-func editRemoteFile(app *Graphite.Application, fp *filepane.FilePane, path, name string) {
-	ctx := context.Background()
-	r, err := fp.FS.Open(ctx, path)
-	if err != nil {
-		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
-		return
-	}
-	tmp, err := os.CreateTemp("", "diskette-edit-*-"+name)
-	if err != nil {
-		r.Close()
-		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
-		return
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	_, copyErr := io.Copy(tmp, r)
-	r.Close()
-	closeErr := tmp.Close()
-	if copyErr != nil {
-		app.ShowMessage(" Error ", copyErr.Error(), Graphite.BtnDanger)
-		return
-	}
-	if closeErr != nil {
-		app.ShowMessage(" Error ", closeErr.Error(), Graphite.BtnDanger)
-		return
-	}
-
-	if !runEditor(app, tmpPath) {
-		return // the editor itself never started; nothing to upload
-	}
-
-	local, err := os.Open(tmpPath)
-	if err != nil {
-		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
-		return
-	}
-	defer local.Close()
-	w, err := fp.FS.Create(ctx, path)
-	if err != nil {
-		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
-		return
-	}
-	if _, err := io.Copy(w, local); err != nil {
-		w.Close()
-		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
-		return
-	}
-	if err := w.Close(); err != nil {
-		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
-		return
-	}
-	fp.Reload()
-}
-
-// runEditor suspends diskette's own terminal rendering, runs the user's
-// editor on path with the real terminal handed to it directly, and
-// resumes afterward. Reports false (with an error already shown) only if
-// the editor failed to even start — a nonzero exit once it's running
-// isn't treated as fatal, since some editors exit nonzero for reasons
-// unrelated to whether the file was actually saved.
-func runEditor(app *Graphite.Application, path string) bool {
-	argv := editorCommand()
-	cmd := exec.Command(argv[0], append(argv[1:], path)...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-
-	app.Suspend()
-	defer app.Resume()
-
-	if err := cmd.Run(); err != nil {
-		if _, ranAtLeast := err.(*exec.ExitError); !ranAtLeast {
-			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
-			return false
-		}
-	}
-	return true
-}
-
-// editorCommand returns the editor to launch, split on whitespace so a
-// $VISUAL/$EDITOR like "code -w" or "vim -u NONE" carries its own flags —
-// $VISUAL first, then $EDITOR (the conventional precedence for a
-// terminal-attached editor over a possibly-GUI one), falling back to a
-// per-OS default when neither is set.
-func editorCommand() []string {
-	for _, envVar := range []string{"VISUAL", "EDITOR"} {
-		if v := strings.TrimSpace(os.Getenv(envVar)); v != "" {
-			return strings.Fields(v)
-		}
-	}
-	if runtime.GOOS == "windows" {
-		return []string{"notepad"}
-	}
-	return []string{"vi"}
-}
-
 // doRename implements F2: rename the entry under the cursor.
 func doRename(app *Graphite.Application, fp *filepane.FilePane) {
 	entry, ok := fp.Selected()
@@ -1793,10 +1782,8 @@ func doRename(app *Graphite.Application, fp *filepane.FilePane) {
 }
 
 // doNewFile implements "New File": create an empty file inside fp's
-// current directory, then immediately open it for editing — the same
-// create-and-edit-in-one-step convention classic commanders use, rather
-// than leaving the user to separately find and open what they just
-// created. Refuses to proceed if the name already exists, since
+// current directory and select it, leaving the user to open it however
+// they like. Refuses to proceed if the name already exists, since
 // fp.FS.Create truncates unconditionally (unlike Mkdir, which already
 // errors on its own for an existing path) — silently emptying an
 // existing file just because its name was reused would be a real way to
@@ -1820,7 +1807,6 @@ func doNewFile(app *Graphite.Application, fp *filepane.FilePane) {
 		}
 		fp.Reload()
 		fp.SelectByName(name)
-		doEdit(app, fp)
 	})
 }
 
