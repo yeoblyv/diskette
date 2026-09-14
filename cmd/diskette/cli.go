@@ -28,8 +28,17 @@ import (
 // one at all — main() falls through to starting the TUI when it didn't,
 // so an ordinary `diskette` (or `diskette` given a path someone expects
 // to open the app to, a possible future addition) is unaffected.
+//
+// Inside a diskette terminal tab specifically, that fallthrough is never
+// right: a bare `diskette`, or any other args[0] this switch doesn't
+// recognize, would otherwise start a second full-screen instance crammed
+// into the small Terminal widget it's actually running inside of. Both
+// cases print cliHelp's command list instead of falling through there.
 func runCLI(args []string) (exitCode int, handled bool) {
 	if len(args) == 0 {
+		if insideDiskettePane() {
+			return cliHelp(), true
+		}
 		return 0, false
 	}
 	switch args[0] {
@@ -44,8 +53,34 @@ func runCLI(args []string) (exitCode int, handled bool) {
 	case "select":
 		return cliSelect(args[1:]), true
 	default:
+		if insideDiskettePane() {
+			return cliHelp(), true
+		}
 		return 0, false
 	}
+}
+
+// insideDiskettePane reports whether this process is running inside a
+// shell diskette itself spawned in one of its own Terminal tabs.
+func insideDiskettePane() bool {
+	_, _, err := diskettePane()
+	return err == nil
+}
+
+// cliHelp lists the commands available from inside a diskette terminal
+// tab, printed in place of actually launching a nested diskette instance.
+func cliHelp() int {
+	fmt.Println("diskette: this shell is running inside a diskette terminal tab, so " +
+		"\"diskette\" here talks back to the open instance instead of starting a new one.")
+	fmt.Println()
+	fmt.Println("Available commands:")
+	fmt.Println()
+	fmt.Println("  diskette view [path]      navigate the other pane to path (default: here)")
+	fmt.Println("  diskette tag <name...>    tag entries by name in the other pane")
+	fmt.Println("  diskette untag <name...>  untag entries by name in the other pane")
+	fmt.Println("  diskette select <name>    move the cursor to one entry in the other pane")
+	fmt.Println("  diskette sync on|off      keep the other pane's path synced to $PWD")
+	return 0
 }
 
 // diskettePane returns this process's IPC address and terminal ID, or an

@@ -1,9 +1,141 @@
 package main
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
+
+// withCapturedStdout runs fn with os.Stdout redirected to a pipe and
+// returns everything written to it — for asserting on cliHelp's output
+// without threading an io.Writer through every CLI function just for
+// this one test.
+func withCapturedStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	fn()
+
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+func TestRunCLI_BareCommandFallsThroughOutsideDisketteTerminal(t *testing.T) {
+	t.Setenv("DISKETTE_IPC", "")
+	t.Setenv("DISKETTE_TERMINAL_ID", "")
+	if _, handled := runCLI(nil); handled {
+		t.Error("runCLI(nil) outside a diskette terminal reported handled=true, want false so main() starts the TUI")
+	}
+}
+
+func TestRunCLI_UnrecognizedCommandFallsThroughOutsideDisketteTerminal(t *testing.T) {
+	t.Setenv("DISKETTE_IPC", "")
+	t.Setenv("DISKETTE_TERMINAL_ID", "")
+	if _, handled := runCLI([]string{"bogus"}); handled {
+		t.Error("runCLI([\"bogus\"]) outside a diskette terminal reported handled=true, want false so main() starts the TUI")
+	}
+}
+
+func TestRunCLI_BareCommandShowsHelpInsideDisketteTerminal(t *testing.T) {
+	t.Setenv("DISKETTE_IPC", "127.0.0.1:0")
+	t.Setenv("DISKETTE_TERMINAL_ID", "t1")
+
+	var code int
+	var handled bool
+	out := withCapturedStdout(t, func() { code, handled = runCLI(nil) })
+
+	if !handled {
+		t.Fatal("runCLI(nil) inside a diskette terminal reported handled=false, want true — a bare \"diskette\" here must not fall through to a nested TUI")
+	}
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out, "diskette view") || !strings.Contains(out, "diskette sync on|off") {
+		t.Errorf("help output = %q, want it to list the available commands", out)
+	}
+}
+
+func TestRunCLI_UnrecognizedCommandShowsHelpInsideDisketteTerminal(t *testing.T) {
+	t.Setenv("DISKETTE_IPC", "127.0.0.1:0")
+	t.Setenv("DISKETTE_TERMINAL_ID", "t1")
+
+	var code int
+	var handled bool
+	out := withCapturedStdout(t, func() { code, handled = runCLI([]string{"bogus"}) })
+
+	if !handled {
+		t.Fatal("runCLI([\"bogus\"]) inside a diskette terminal reported handled=false, want true")
+	}
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out, "Available commands") {
+		t.Errorf("help output = %q, want the command list", out)
+	}
+}
+
+func TestRunCLI_RecognizedCommandsStillDispatchInsideDisketteTerminal(t *testing.T) {
+	t.Setenv("DISKETTE_IPC", "127.0.0.1:0")
+	t.Setenv("DISKETTE_TERMINAL_ID", "t1")
+
+	// "select" with the wrong argument count is a recognized command
+	// that fails its own validation — it must still take that path
+	// (and print its own usage) rather than falling into cliHelp.
+	var out string
+	code, handled := 0, false
+	out = withCapturedStdoutStderr(t, func() { code, handled = runCLI([]string{"select"}) })
+	if !handled {
+		t.Fatal("runCLI([\"select\"]) reported handled=false, want true")
+	}
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(out, "usage: diskette select") {
+		t.Errorf("output = %q, want cliSelect's own usage message, not cliHelp's", out)
+	}
+}
+
+// withCapturedStdoutStderr is withCapturedStdout plus stderr, since
+// cliSelect's usage message goes to stderr rather than stdout.
+func withCapturedStdoutStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = wOut, wErr
+	defer func() { os.Stdout, os.Stderr = origOut, origErr }()
+
+	fn()
+
+	wOut.Close()
+	wErr.Close()
+	out, err := io.ReadAll(rOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errOut, err := io.ReadAll(rErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out) + string(errOut)
+}
 
 func TestShellKindOf(t *testing.T) {
 	cases := []struct {
