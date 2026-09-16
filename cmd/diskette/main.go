@@ -2231,7 +2231,11 @@ func showConflictModal(app *Graphite.Application, c copyengine.Conflict, respond
 // path to "protect this from being reset on restart" rather than needing
 // a separate button per row), plus a small add/close toolbar under each.
 func showManageTabs(app *Graphite.Application, left, right *paneTabs) {
-	mod := Graphite.NewWindow(74, 18, app.T(locales.KeyManageTabsTitle))
+	// Width 84, not the original 74: that width left the right column's
+	// own add/close row (starting at the same fixed x=38 as the English
+	// version) with zero margin before Window's own PaddingX-trimmed
+	// right edge — enough for "Close" but not "Закрити"/"Sluiten".
+	mod := Graphite.NewWindow(84, 18, app.T(locales.KeyManageTabsTitle))
 
 	mod.AddWidget(Graphite.NewLabel(2, 1, app.T(locales.KeyManageTabsLeft)))
 	mod.AddWidget(Graphite.NewLabel(38, 1, app.T(locales.KeyManageTabsRight)))
