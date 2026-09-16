@@ -148,3 +148,24 @@ func TestCLIShimDir_CreatesAFileLiterallyNamedDiskette(t *testing.T) {
 		t.Errorf("%s does not resolve to the running executable %s", link, exe)
 	}
 }
+
+func TestNextButtonX_LongerLabelPushesTheNextButtonFurtherRight(t *testing.T) {
+	// "Connect"/"Cancel" (English) leaves plenty of room; "Підключитися"
+	// (Ukrainian, 12 runes) is the actual case that motivated this
+	// helper — a hardcoded offset tuned for "Connect" (7 runes) put
+	// "Cancel" right on top of the translated button's own closing "]".
+	short := nextButtonX(2, "Connect")
+	long := nextButtonX(2, "Підключитися")
+	if long <= short {
+		t.Errorf("nextButtonX(2, %q) = %d, want it greater than nextButtonX(2, %q) = %d", "Підключитися", long, "Connect", short)
+	}
+	// The gap must always clear the previous button's own rendered
+	// width ("[ " + label + " ]") plus at least one column of breathing
+	// room — the exact bug this test guards: a button starting inside
+	// the one before it.
+	label := "Підключитися"
+	prevButtonEnd := 2 + len([]rune("[ "+label+" ]"))
+	if got := nextButtonX(2, label); got <= prevButtonEnd {
+		t.Errorf("nextButtonX(2, %q) = %d, want it past the previous button's own end at %d", label, got, prevButtonEnd)
+	}
+}

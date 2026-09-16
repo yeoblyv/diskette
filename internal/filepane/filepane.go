@@ -16,6 +16,7 @@ import (
 
 	Graphite "github.com/yeoblyv/graphite"
 
+	"github.com/yeoblyv/diskette/internal/locales"
 	"github.com/yeoblyv/diskette/internal/vfs"
 )
 
@@ -115,6 +116,32 @@ type FilePane struct {
 	// row) — the host program's hook for launching it in the OS's
 	// associated default application.
 	OnOpenFile func(path string)
+
+	// Translate, if set, resolves a locales.Key* constant (see
+	// internal/locales) to display text for the column headers and
+	// status line DrawRelative draws every frame — a stored function
+	// value (main.go sets it to app.T) rather than a snapshot of already-
+	// translated strings, so a later Application.SetLocale call is
+	// reflected the very next frame with no extra "retranslate this
+	// FilePane" step. nil (the zero value, e.g. in a test that doesn't
+	// care about i18n) falls back to English via t below.
+	Translate func(key string, args ...any) string
+}
+
+// t resolves key via Translate if set, otherwise falls back to English —
+// see Translate's own doc comment.
+func (fp *FilePane) t(key string, args ...any) string {
+	if fp.Translate != nil {
+		return fp.Translate(key, args...)
+	}
+	text := locales.English[key]
+	if text == "" {
+		text = key
+	}
+	if len(args) == 0 {
+		return text
+	}
+	return fmt.Sprintf(text, args...)
 }
 
 // New creates a FilePane at (x, y, w, h) — 0/negative w or h stretch to
@@ -828,18 +855,18 @@ func (fp *FilePane) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) {
 	for i := 0; i < fp.LastW; i++ {
 		c.DrawCell(fp.AbsX+i, fp.AbsY, " ", headerBg, fgDim)
 	}
-	c.DrawTextBounded(fp.AbsX, fp.AbsY, l.nameW, sortLabel("Name", fp.sortField == SortByName, fp.sortDesc), headerBg, fgDim)
+	c.DrawTextBounded(fp.AbsX, fp.AbsY, l.nameW, sortLabel(fp.t(locales.KeyFilePaneColName), fp.sortField == SortByName, fp.sortDesc), headerBg, fgDim)
 	if l.extX >= 0 {
-		c.DrawTextBounded(fp.AbsX+l.extX, fp.AbsY, extColWidth, sortLabel("Ext", fp.sortField == SortByExt, fp.sortDesc), headerBg, fgDim)
+		c.DrawTextBounded(fp.AbsX+l.extX, fp.AbsY, extColWidth, sortLabel(fp.t(locales.KeyFilePaneColExt), fp.sortField == SortByExt, fp.sortDesc), headerBg, fgDim)
 	}
 	if l.sizeX >= 0 {
-		c.DrawTextBounded(fp.AbsX+l.sizeX, fp.AbsY, sizeColWidth, sortLabel("Size", fp.sortField == SortBySize, fp.sortDesc), headerBg, fgDim)
+		c.DrawTextBounded(fp.AbsX+l.sizeX, fp.AbsY, sizeColWidth, sortLabel(fp.t(locales.KeyFilePaneColSize), fp.sortField == SortBySize, fp.sortDesc), headerBg, fgDim)
 	}
 	if l.dateX >= 0 {
-		c.DrawTextBounded(fp.AbsX+l.dateX, fp.AbsY, dateColWidth, sortLabel("Date", fp.sortField == SortByDate, fp.sortDesc), headerBg, fgDim)
+		c.DrawTextBounded(fp.AbsX+l.dateX, fp.AbsY, dateColWidth, sortLabel(fp.t(locales.KeyFilePaneColDate), fp.sortField == SortByDate, fp.sortDesc), headerBg, fgDim)
 	}
 	if l.attrX >= 0 {
-		c.DrawTextBounded(fp.AbsX+l.attrX, fp.AbsY, attrColWidth, "Attr", headerBg, fgDim)
+		c.DrawTextBounded(fp.AbsX+l.attrX, fp.AbsY, attrColWidth, fp.t(locales.KeyFilePaneColAttr), headerBg, fgDim)
 	}
 
 	visible := fp.visibleRows()
@@ -962,9 +989,9 @@ func (fp *FilePane) statusLine() string {
 		}
 	}
 	if tagged, size, any := fp.TaggedSummary(); any {
-		return fmt.Sprintf("%d file(s), %d dir(s) — %d tagged (%s)", files, dirs, tagged, formatSize(size))
+		return fp.t(locales.KeyFilePaneStatusTagged, files, dirs, tagged, formatSize(size))
 	}
-	return fmt.Sprintf("%d file(s), %d dir(s)", files, dirs)
+	return fp.t(locales.KeyFilePaneStatusPlain, files, dirs)
 }
 
 // drawRow renders one listing row at absolute row y.

@@ -68,12 +68,19 @@ func (k *Kind) UnmarshalJSON(data []byte) error {
 
 // SavedState is the whole on-disk file: each pane's pinned tabs, in
 // order, with the pane's active one marked by index — -1 if none of the
-// saved tabs was the active one (e.g. the active tab wasn't pinned).
+// saved tabs was the active one (e.g. the active tab wasn't pinned) —
+// plus the last UI language chosen via the Help menu's Language
+// submenu. Locale is a plain string (a Graphite.Locale's own underlying
+// type) rather than graphite's type itself, so this package doesn't need
+// to depend on graphite just to describe which language was picked;
+// cmd/diskette converts between them. Empty means "not set yet" — the
+// caller falls back to detecting one from the OS environment instead.
 type SavedState struct {
 	Left        []SavedTab `json:"left"`
 	LeftActive  int        `json:"leftActive"`
 	Right       []SavedTab `json:"right"`
 	RightActive int        `json:"rightActive"`
+	Locale      string     `json:"locale,omitempty"`
 }
 
 // configPath returns where pinned tabs are saved: a per-user config

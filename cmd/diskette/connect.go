@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,18 +16,24 @@ import (
 	Graphite "github.com/yeoblyv/graphite"
 
 	"github.com/yeoblyv/diskette/internal/ftpfs"
+	"github.com/yeoblyv/diskette/internal/locales"
 	"github.com/yeoblyv/diskette/internal/sftpfs"
 	"github.com/yeoblyv/diskette/internal/tabs"
 )
 
 // protocolLabels are the dialog's top-level Protocol choices, index-for-
-// index with the sftp/ftp sections toggled below.
+// index with the sftp/ftp sections toggled below — protocol names, never
+// translated (like "SFTP"/"FTP" anywhere else in the UI).
 var protocolLabels = []string{"SFTP", "FTP"}
 
-// authMethodLabels are the sftpfs.AuthMethod choices offered in the
+// authMethodLabels returns the sftpfs.AuthMethod choices offered in the
 // dialog's ComboBox, index-for-index with sftpfs.AuthPassword/
-// AuthPrivateKey/AuthAgent.
-var authMethodLabels = []string{"Password", "Private key", "SSH agent"}
+// AuthPrivateKey/AuthAgent, translated for app's current locale — a
+// function rather than a package-level var (unlike protocolLabels, which
+// never changes) since these three actually are ordinary words.
+func authMethodLabels(app *Graphite.Application) []string {
+	return []string{app.T(locales.KeyAuthPassword), app.T(locales.KeyAuthPrivateKey), app.T(locales.KeyAuthAgent)}
+}
 
 // authMethodStrings is authMethodLabels' persisted-string counterpart
 // (tabs.SavedRemote.AuthMethod), so a saved connection's auth method
@@ -36,9 +41,12 @@ var authMethodLabels = []string{"Password", "Private key", "SSH agent"}
 // for its own enum.
 var authMethodStrings = []string{"password", "privatekey", "agent"}
 
-// ftpTLSLabels are the dialog's FTP Security choices, index-for-index
-// with ftpfs.TLSNone/TLSExplicit/TLSImplicit.
-var ftpTLSLabels = []string{"None", "FTPS (explicit)", "FTPS (implicit)"}
+// ftpTLSLabels returns the dialog's FTP Security choices, index-for-index
+// with ftpfs.TLSNone/TLSExplicit/TLSImplicit, translated for app's
+// current locale — see authMethodLabels.
+func ftpTLSLabels(app *Graphite.Application) []string {
+	return []string{app.T(locales.KeyTLSNone), app.T(locales.KeyTLSExplicit), app.T(locales.KeyTLSImplicit)}
+}
 
 // ftpTLSStrings is ftpTLSLabels' persisted-string counterpart
 // (tabs.SavedRemote.TLSMode), for the same reason authMethodStrings
@@ -93,32 +101,32 @@ func guessKeyPath() string {
 // caller can mark the new tab pinned/renamed/positioned to match
 // whatever it's replacing (AddRemote itself has no way to know that).
 func showConnectDialog(app *Graphite.Application, target *paneTabs, prefill *tabs.SavedRemote, startPath string, onConnected func()) {
-	mod := Graphite.NewWindow(60, 30, " Connect to server ")
+	mod := Graphite.NewWindow(60, 30, app.T(locales.KeyConnectTitle))
 
 	protocolRow := Graphite.NewFlex(2, 1, 54, 1, Graphite.FlexRow)
 	protocolRow.Gap = 1
 	protocolCombo := Graphite.NewComboBox(0, 0, 16, protocolLabels, nil)
-	protocolRow.AddChild(Graphite.NewLabel(0, 0, "Protocol:"), 0)
+	protocolRow.AddChild(Graphite.NewLabel(0, 0, app.T(locales.KeyConnectProtocol)), 0)
 	protocolRow.AddChild(protocolCombo, 0)
 	mod.AddWidget(protocolRow)
 
 	// --- SFTP section ---
 
-	sftpHostBox := Graphite.NewInputBox(0, 0, 54, "Host:      ")
-	sftpPortBox := Graphite.NewInputBox(0, 0, 54, "Port:      ")
+	sftpHostBox := Graphite.NewInputBox(0, 0, 54, app.T(locales.KeyConnectHost))
+	sftpPortBox := Graphite.NewInputBox(0, 0, 54, app.T(locales.KeyConnectPort))
 	sftpPortBox.Value = "22"
 	sftpPortBox.CursorPos = len(sftpPortBox.Value)
-	sftpUserBox := Graphite.NewInputBox(0, 0, 54, "Username:  ")
+	sftpUserBox := Graphite.NewInputBox(0, 0, 54, app.T(locales.KeyConnectUsername))
 
 	authRow := Graphite.NewFlex(0, 0, 54, 1, Graphite.FlexRow)
 	authRow.Gap = 1
-	authCombo := Graphite.NewComboBox(0, 0, 20, authMethodLabels, nil)
+	authCombo := Graphite.NewComboBox(0, 0, 20, authMethodLabels(app), nil)
 
-	keyPathBox := Graphite.NewInputBox(0, 0, 54, "Key file:  ")
+	keyPathBox := Graphite.NewInputBox(0, 0, 54, app.T(locales.KeyConnectKeyFile))
 	keyPathBox.Value = guessKeyPath()
 	keyPathBox.CursorPos = len([]rune(keyPathBox.Value))
-	passphraseBox := Graphite.NewPasswordBox(0, 0, 54, "Passphrase:")
-	passwordBox := Graphite.NewPasswordBox(0, 0, 54, "Password:  ")
+	passphraseBox := Graphite.NewPasswordBox(0, 0, 54, app.T(locales.KeyConnectPassphrase))
+	passwordBox := Graphite.NewPasswordBox(0, 0, 54, app.T(locales.KeyConnectPassword))
 
 	applyAuthVisibility := func() {
 		switch sftpfs.AuthMethod(authCombo.Selected) {
@@ -132,7 +140,7 @@ func showConnectDialog(app *Graphite.Application, target *paneTabs, prefill *tab
 	}
 	authCombo.OnSelect = func(int, string) { applyAuthVisibility() }
 	applyAuthVisibility()
-	authRow.AddChild(Graphite.NewLabel(0, 0, "Auth method:"), 0)
+	authRow.AddChild(Graphite.NewLabel(0, 0, app.T(locales.KeyConnectAuthMethod)), 0)
 	authRow.AddChild(authCombo, 0)
 
 	// secretFlex holds only the rows whose visibility depends on the
@@ -162,17 +170,17 @@ func showConnectDialog(app *Graphite.Application, target *paneTabs, prefill *tab
 
 	// --- FTP section ---
 
-	ftpHostBox := Graphite.NewInputBox(0, 0, 54, "Host:      ")
-	ftpPortBox := Graphite.NewInputBox(0, 0, 54, "Port:      ")
+	ftpHostBox := Graphite.NewInputBox(0, 0, 54, app.T(locales.KeyConnectHost))
+	ftpPortBox := Graphite.NewInputBox(0, 0, 54, app.T(locales.KeyConnectPort))
 	ftpPortBox.Value = "21"
 	ftpPortBox.CursorPos = len(ftpPortBox.Value)
-	ftpUserBox := Graphite.NewInputBox(0, 0, 54, "Username:  ")
-	ftpPasswordBox := Graphite.NewPasswordBox(0, 0, 54, "Password:  ")
+	ftpUserBox := Graphite.NewInputBox(0, 0, 54, app.T(locales.KeyConnectUsername))
+	ftpPasswordBox := Graphite.NewPasswordBox(0, 0, 54, app.T(locales.KeyConnectPassword))
 
 	securityRow := Graphite.NewFlex(0, 0, 54, 1, Graphite.FlexRow)
 	securityRow.Gap = 1
-	securityCombo := Graphite.NewComboBox(0, 0, 20, ftpTLSLabels, nil)
-	securityRow.AddChild(Graphite.NewLabel(0, 0, "Security:"), 0)
+	securityCombo := Graphite.NewComboBox(0, 0, 20, ftpTLSLabels(app), nil)
+	securityRow.AddChild(Graphite.NewLabel(0, 0, app.T(locales.KeyConnectSecurity)), 0)
 	securityRow.AddChild(securityCombo, 0)
 
 	ftpSection := Graphite.NewFlex(2, 3, 54, -4, Graphite.FlexColumn)
@@ -253,8 +261,9 @@ func showConnectDialog(app *Graphite.Application, target *paneTabs, prefill *tab
 	ftpUserBox.OnSubmit = func(string) { doConnect() }
 	ftpPasswordBox.OnSubmit = func(string) { doConnect() }
 
-	mod.AddWidget(Graphite.NewButton(2, -2, "Connect", Graphite.BtnSuccess, doConnect))
-	mod.AddWidget(Graphite.NewButton(14, -2, "Cancel", Graphite.BtnDefault, func() {
+	connectLabel := app.T(locales.KeyConnectButton)
+	mod.AddWidget(Graphite.NewButton(2, -2, connectLabel, Graphite.BtnSuccess, doConnect))
+	mod.AddWidget(Graphite.NewButton(nextButtonX(2, connectLabel), -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		// Refuses to close while a dial is in flight: the connect
 		// goroutine's own completion handler closes this exact modal by
 		// calling app.CloseModal() unconditionally once it resolves,
@@ -279,7 +288,7 @@ func parsePort(app *Graphite.Application, box *Graphite.InputBox, def int) (port
 	}
 	p, err := strconv.Atoi(text)
 	if err != nil {
-		app.ShowMessage(" Error ", "Port must be a number.", Graphite.BtnDanger)
+		app.ShowMessage(app.T(locales.KeyErrorTitle), app.T(locales.KeyErrPortNumber), Graphite.BtnDanger)
 		return 0, false
 	}
 	return p, true
@@ -295,7 +304,7 @@ func connectSFTPFromDialog(app *Graphite.Application, target *paneTabs, startPat
 	}
 	host := strings.TrimSpace(hostBox.Value)
 	if host == "" {
-		app.ShowMessage(" Error ", "Host cannot be empty.", Graphite.BtnDanger)
+		app.ShowMessage(app.T(locales.KeyErrorTitle), app.T(locales.KeyErrHostEmpty), Graphite.BtnDanger)
 		return
 	}
 
@@ -325,7 +334,7 @@ func connectFTPFromDialog(app *Graphite.Application, target *paneTabs, startPath
 	}
 	host := strings.TrimSpace(hostBox.Value)
 	if host == "" {
-		app.ShowMessage(" Error ", "Host cannot be empty.", Graphite.BtnDanger)
+		app.ShowMessage(app.T(locales.KeyErrorTitle), app.T(locales.KeyErrHostEmpty), Graphite.BtnDanger)
 		return
 	}
 
@@ -358,7 +367,7 @@ func connectSFTP(app *Graphite.Application, target *paneTabs, startPath string, 
 
 		knownHostsPath, err := sftpfs.DefaultKnownHostsPath()
 		if err != nil {
-			app.Invoke(func() { app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger) })
+			app.Invoke(func() { app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger) })
 			return
 		}
 
@@ -372,14 +381,14 @@ func connectSFTP(app *Graphite.Application, target *paneTabs, startPath string, 
 
 		hostKeyCB, err := sftpfs.VerifyHostKey(knownHostsPath, prompt)
 		if err != nil {
-			app.Invoke(func() { app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger) })
+			app.Invoke(func() { app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger) })
 			return
 		}
 
 		fs, err := sftpfs.Dial(context.Background(), cfg, hostKeyCB)
 		app.Invoke(func() {
 			if err != nil {
-				app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+				app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 				return
 			}
 			app.CloseModal() // the connect dialog
@@ -404,7 +413,7 @@ func connectFTP(app *Graphite.Application, target *paneTabs, startPath string, c
 		fs, err := ftpfs.Dial(context.Background(), cfg)
 		app.Invoke(func() {
 			if err != nil {
-				app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+				app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 				return
 			}
 			app.CloseModal() // the connect dialog
@@ -426,23 +435,21 @@ func connectFTP(app *Graphite.Application, target *paneTabs, startPath string, c
 // to also run a decline callback, and connectSFTP's prompt goroutine is
 // blocked on respond being called either way.
 func showHostKeyConfirm(app *Graphite.Application, hostname string, key ssh.PublicKey, respond func(bool)) {
-	msg := fmt.Sprintf(
-		"The authenticity of host '%s' can't be established.\n%s key fingerprint:\n%s\n\nTrust this key and continue connecting?",
-		hostname, key.Type(), ssh.FingerprintSHA256(key),
-	)
+	msg := app.T(locales.KeyHostKeyMessage, hostname, key.Type(), ssh.FingerprintSHA256(key))
 	lines := len(strings.Split(msg, "\n"))
 	winH := lines + 6
 	if winH < 10 {
 		winH = 10
 	}
 
-	mod := Graphite.NewWindow(56, winH, " Unknown Host ")
+	mod := Graphite.NewWindow(56, winH, app.T(locales.KeyHostKeyTitle))
 	mod.AddWidget(Graphite.NewLabel(2, 1, msg))
-	mod.AddWidget(Graphite.NewButton(2, -2, "Trust", Graphite.BtnDanger, func() {
+	trustLabel := app.T(locales.KeyHostKeyTrust)
+	mod.AddWidget(Graphite.NewButton(2, -2, trustLabel, Graphite.BtnDanger, func() {
 		app.CloseModal()
 		respond(true)
 	}))
-	mod.AddWidget(Graphite.NewButton(14, -2, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(nextButtonX(2, trustLabel), -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		app.CloseModal()
 		respond(false)
 	}))
@@ -461,7 +468,7 @@ func doReconnect(app *Graphite.Application, p *paneTabs) {
 	idx := p.group.Active
 	content, ok := p.contentAt(idx)
 	if !ok || content.remote == nil {
-		app.ShowMessage(" Error ", "The active tab isn't connected to a server.", Graphite.BtnDanger)
+		app.ShowMessage(app.T(locales.KeyErrorTitle), app.T(locales.KeyErrNotConnected), Graphite.BtnDanger)
 		return
 	}
 
@@ -495,7 +502,7 @@ func doDisconnect(app *Graphite.Application, p *paneTabs) {
 	idx := p.group.Active
 	content, ok := p.contentAt(idx)
 	if !ok || content.remote == nil {
-		app.ShowMessage(" Error ", "The active tab isn't connected to a server.", Graphite.BtnDanger)
+		app.ShowMessage(app.T(locales.KeyErrorTitle), app.T(locales.KeyErrNotConnected), Graphite.BtnDanger)
 		return
 	}
 

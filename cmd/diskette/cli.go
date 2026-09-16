@@ -22,6 +22,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	Graphite "github.com/yeoblyv/graphite"
+
+	"github.com/yeoblyv/diskette/internal/locales"
 )
 
 // runCLI runs a recognized subcommand and reports whether args[0] named
@@ -68,19 +72,47 @@ func insideDiskettePane() bool {
 }
 
 // cliHelp lists the commands available from inside a diskette terminal
-// tab, printed in place of actually launching a nested diskette instance.
+// tab, printed in place of actually launching a nested diskette instance,
+// in whichever language the running diskette instance was showing when
+// it spawned this shell (see cliCatalog — this process is a separate
+// invocation of the binary with no *Graphite.Application of its own to
+// call T on, so DISKETTE_LOCALE is how that choice reaches it).
 func cliHelp() int {
-	fmt.Println("diskette: this shell is running inside a diskette terminal tab, so " +
-		"\"diskette\" here talks back to the open instance instead of starting a new one.")
+	cat := cliCatalog()
+	t := func(key string) string {
+		if v := cat[key]; v != "" {
+			return v
+		}
+		return locales.English[key] // the same English-fallback rule Application.T itself follows
+	}
+	fmt.Println(t(locales.KeyCLIHelpIntro))
 	fmt.Println()
-	fmt.Println("Available commands:")
+	fmt.Println(t(locales.KeyCLIHelpCommands))
 	fmt.Println()
-	fmt.Println("  diskette view [path]      navigate the other pane to path (default: here)")
-	fmt.Println("  diskette tag <name...>    tag entries by name in the other pane")
-	fmt.Println("  diskette untag <name...>  untag entries by name in the other pane")
-	fmt.Println("  diskette select <name>    move the cursor to one entry in the other pane")
-	fmt.Println("  diskette sync on|off      keep the other pane's path synced to $PWD")
+	fmt.Println(t(locales.KeyCLIHelpView))
+	fmt.Println(t(locales.KeyCLIHelpTag))
+	fmt.Println(t(locales.KeyCLIHelpUntag))
+	fmt.Println(t(locales.KeyCLIHelpSelect))
+	fmt.Println(t(locales.KeyCLIHelpSync))
 	return 0
+}
+
+// cliCatalog resolves $DISKETTE_LOCALE (set by newTerminalContent from
+// the running instance's own Application.Locale) to one of diskette's
+// four translated catalogs, falling back to English for an unset or
+// unrecognized value — the same fallback locales.English itself already
+// provides for any individual missing key.
+func cliCatalog() Graphite.Catalog {
+	switch Graphite.Locale(os.Getenv("DISKETTE_LOCALE")) {
+	case Graphite.LocaleUkrainian:
+		return locales.Ukrainian
+	case Graphite.LocaleRussian:
+		return locales.Russian
+	case Graphite.LocaleDutch:
+		return locales.Dutch
+	default:
+		return locales.English
+	}
 }
 
 // diskettePane returns this process's IPC address and terminal ID, or an

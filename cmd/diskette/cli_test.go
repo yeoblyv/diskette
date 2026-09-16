@@ -196,3 +196,29 @@ func TestLooksLikeShellPath(t *testing.T) {
 		t.Error("looksLikeShellPath(\"/bin/bash\", \"zsh\") = true, want false")
 	}
 }
+
+func TestCliHelp_RespectsDisketteLocale(t *testing.T) {
+	t.Setenv("DISKETTE_IPC", "127.0.0.1:0")
+	t.Setenv("DISKETTE_TERMINAL_ID", "t1")
+
+	cases := []struct {
+		locale string
+		want   string // a phrase only that language's translation contains
+	}{
+		{"", "navigate the other pane"}, // unset falls back to English
+		{"en", "navigate the other pane"},
+		{"uk", "перейти в іншій панелі"},
+		{"ru", "перейти в другой панели"},
+		{"nl", "navigeer het andere paneel"},
+		{"fr", "navigate the other pane"}, // an unrecognized locale also falls back to English
+	}
+	for _, tc := range cases {
+		t.Run(tc.locale, func(t *testing.T) {
+			t.Setenv("DISKETTE_LOCALE", tc.locale)
+			out := withCapturedStdout(t, func() { runCLI([]string{"bogus"}) })
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("DISKETTE_LOCALE=%q: output = %q, want it to contain %q", tc.locale, out, tc.want)
+			}
+		})
+	}
+}

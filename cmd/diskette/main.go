@@ -26,6 +26,7 @@ import (
 	"github.com/yeoblyv/diskette/internal/filepane"
 	"github.com/yeoblyv/diskette/internal/fkeybar"
 	"github.com/yeoblyv/diskette/internal/grep"
+	"github.com/yeoblyv/diskette/internal/locales"
 	"github.com/yeoblyv/diskette/internal/openwith"
 	"github.com/yeoblyv/diskette/internal/roots"
 	"github.com/yeoblyv/diskette/internal/search"
@@ -62,6 +63,7 @@ func runTUI() {
 
 	app := Graphite.NewApplication()
 	app.SetTheme(theme.Diskette())
+	setupLocales(app)
 	win := Graphite.NewFullscreenWindow()
 
 	fs := vfs.LocalFS{}
@@ -128,7 +130,7 @@ func runTUI() {
 	refreshStatus := func() {
 		if fp, ok := activeGroup().ActiveFilePane(); ok {
 			if q := fp.SearchQuery(); q != "" {
-				fKeyBar.Status = "Search: " + q
+				fKeyBar.Status = app.T(locales.KeyStatusSearch, q)
 				return
 			}
 		}
@@ -144,7 +146,7 @@ func runTUI() {
 	mainRow.AddChild(newActionGutter(app, leftTabs, rightTabs), 0)
 	mainRow.AddChild(rightTabs, 1)
 
-	diskBar := newDiskSpaceBar(func() statusBarState {
+	diskBar := newDiskSpaceBar(app, func() statusBarState {
 		group := leftTabs
 		if rightTabs.HasFocus() {
 			group = rightTabs
@@ -209,6 +211,51 @@ func runTUI() {
 	app.Run()
 }
 
+// setupLocales registers diskette's own translation catalogs (see
+// internal/locales) for every language it ships, and sets the current
+// one: whatever was chosen last time via the Help menu's Language
+// submenu (persisted in tabs.json, see saveTabs), or failing that,
+// whatever detectLocale can infer from the OS environment. Must run
+// before any widget that draws translated text is built — the menu
+// strip, F-key bar, and every FilePane all read Application.T (directly
+// or via FilePane.Translate) as they're constructed.
+func setupLocales(app *Graphite.Application) {
+	app.SetTranslations(Graphite.LocaleEnglish, locales.English)
+	app.SetTranslations(Graphite.LocaleUkrainian, locales.Ukrainian)
+	app.SetTranslations(Graphite.LocaleRussian, locales.Russian)
+	app.SetTranslations(Graphite.LocaleDutch, locales.Dutch)
+
+	state, _ := tabs.Load() // a missing/unreadable file just means "nothing saved yet"
+	app.SetLocale(detectLocale(state.Locale))
+}
+
+// detectLocale returns saved as a Locale if it's non-empty (a language
+// explicitly chosen before, see setupLocales), otherwise falls back to
+// the OS environment: the first of $LC_ALL/$LC_MESSAGES/$LANG (the
+// standard POSIX precedence order) whose language subtag names one of
+// diskette's translated locales, or LocaleEnglish if none does or none
+// of those variables is set. graphite itself never reads the
+// environment for this (see docs/i18n.md's "No locale auto-detection"),
+// so this is diskette's own job, done once at startup.
+func detectLocale(saved string) Graphite.Locale {
+	if saved != "" {
+		return Graphite.Locale(saved)
+	}
+	for _, envVar := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
+		v := os.Getenv(envVar)
+		if v == "" {
+			continue
+		}
+		lang, _, _ := strings.Cut(v, "_")
+		lang, _, _ = strings.Cut(lang, ".")
+		switch Graphite.Locale(lang) {
+		case Graphite.LocaleUkrainian, Graphite.LocaleRussian, Graphite.LocaleDutch:
+			return Graphite.Locale(lang)
+		}
+	}
+	return Graphite.LocaleEnglish
+}
+
 // installSignalSaveHandler makes SIGINT/SIGTERM/SIGHUP save pinned tabs
 // and clean up before the process actually dies, the same way a
 // confirmed F10/Escape quit already does — closing the terminal window
@@ -268,7 +315,7 @@ func newNavButton(label string, onClick func()) *Graphite.Button {
 // every other file operation reports one.
 func openFile(app *Graphite.Application, path string) {
 	if err := openwith.Open(path); err != nil {
-		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 	}
 }
 
@@ -284,7 +331,7 @@ func newNavRow(app *Graphite.Application, fp *filepane.FilePane) *Graphite.Flex 
 	row.Gap = 1
 	row.AddChild(newNavButton("<", func() { fp.Back() }), 0)
 	row.AddChild(newNavButton(">", func() { fp.Forward() }), 0)
-	row.AddChild(newNavButton("Root", func() {
+	row.AddChild(newNavButton(app.T(locales.KeyNavRoot), func() {
 		if _, ok := fp.FS.(vfs.LocalFS); ok {
 			promptChooseRoot(app, fp)
 		} else {
@@ -356,9 +403,10 @@ func (c tabContent) focusable() Graphite.Widget {
 // always has been.
 func newFileListContent(app *Graphite.Application, fs vfs.FileSystem, path string) tabContent {
 	fp := filepane.New(0, 0, 0, 0, fs, path)
+	fp.Translate = app.T
 	fp.OnOpenFile = func(p string) {
 		if _, ok := fs.(vfs.LocalFS); !ok {
-			app.ShowMessage(" Error ", "Opening a remote file isn't supported yet.", Graphite.BtnDanger)
+			app.ShowMessage(app.T(locales.KeyErrorTitle), app.T(locales.KeyErrRemoteEditUnsupported), Graphite.BtnDanger)
 			return
 		}
 		openFile(app, p)
@@ -388,6 +436,7 @@ func newTerminalContent(app *Graphite.Application, ipcAddr string) (tabContent, 
 
 	os.Setenv("DISKETTE_IPC", ipcAddr)
 	os.Setenv("DISKETTE_TERMINAL_ID", id)
+	os.Setenv("DISKETTE_LOCALE", string(app.Locale()))
 	kind := shellKindOf(shell)
 	os.Setenv("DISKETTE_SHELL_KIND", kind)
 	if shimDir, err := cliShimDir(); err == nil {
@@ -618,17 +667,22 @@ func shellKindOf(shellPath string) string {
 }
 
 // tabName returns a FileList tab's display name (the directory's own base
-// name — "Root" for a filesystem root, which has no meaningful base name
-// of its own) or a Terminal tab's, which is always just "Terminal": there
-// is no path or title to derive a nicer one from without an OSC 0/2
-// title, which this pane doesn't read.
-func tabName(kind tabs.Kind, path string) string {
+// name — a translated "Root" for a filesystem root, which has no
+// meaningful base name of its own) or a Terminal tab's, which is always
+// just a translated "Terminal": there is no path or title to derive a
+// nicer one from without an OSC 0/2 title, which this pane doesn't read.
+// Translated once at creation time, like the nav row's own Root button —
+// an already-open tab's name doesn't retroactively change if the UI
+// language changes later, the one narrow live-retranslation gap this
+// program's i18n has (see docs/i18n.md's own "doesn't retroactively
+// touch anything already on screen").
+func tabName(app *Graphite.Application, kind tabs.Kind, path string) string {
 	if kind == tabs.Terminal {
-		return "Terminal"
+		return app.T(locales.KeyTabTerminal)
 	}
 	base := filepath.Base(path)
 	if base == "." || base == string(filepath.Separator) {
-		return "Root"
+		return app.T(locales.KeyTabRoot)
 	}
 	return base
 }
@@ -704,7 +758,7 @@ func (p *paneTabs) AddFileList(path string) {
 	wasFocused := p.HasFocus()
 	content := newFileListContent(p.app, p.fs, path)
 	p.wireFileList(content.filePane)
-	p.group.Add(&tabs.Tab{Kind: tabs.FileList, Name: tabName(tabs.FileList, path), Widget: content})
+	p.group.Add(&tabs.Tab{Kind: tabs.FileList, Name: tabName(p.app, tabs.FileList, path), Widget: content})
 	if wasFocused {
 		content.focusable().SetFocus(true)
 	}
@@ -723,7 +777,7 @@ func (p *paneTabs) AddTerminal() error {
 	if p.ipcTermRegistry != nil {
 		p.ipcTermRegistry.register(content.id, p)
 	}
-	p.group.Add(&tabs.Tab{Kind: tabs.Terminal, Name: tabName(tabs.Terminal, ""), Widget: content})
+	p.group.Add(&tabs.Tab{Kind: tabs.Terminal, Name: tabName(p.app, tabs.Terminal, ""), Widget: content})
 	if wasFocused {
 		content.focusable().SetFocus(true)
 	}
@@ -932,31 +986,35 @@ func (p *paneTabs) HandleEvent(ev Graphite.Event) {
 // the gutter's full width (see dirButton's own DrawRelative for why that
 // requires a custom widget rather than a plain Button).
 func newActionGutter(app *Graphite.Application, left, right *paneTabs) *Graphite.Flex {
-	gutter := Graphite.NewFlex(0, 0, 15, 0, Graphite.FlexColumn)
+	// Width 19, not 15: wide enough for "[ Перемістити ▶ ]"/"[ Переместить ▶ ]"/
+	// "[ Verplaatsen ▶ ]" (the longest translated gutter label, at 11 runes,
+	// across en/uk/ru/nl) without dirButton.DrawRelative's own centering
+	// truncating it — 15 only ever fit the English words.
+	gutter := Graphite.NewFlex(0, 0, 19, 0, Graphite.FlexColumn)
 	gutter.Gap = 1
 	gutter.AddChild(Graphite.NewPanel(0, 0, 0, 0), 1)
-	gutter.AddChild(newDirButton(left, right, "Copy", func(src, dst *paneTabs) {
+	gutter.AddChild(newDirButton(app, left, right, locales.KeyGutterCopy, func(src, dst *paneTabs) {
 		srcFP, ok1 := src.ActiveFilePane()
 		dstFP, ok2 := dst.ActiveFilePane()
 		if ok1 && ok2 {
 			doCopyOrMove(app, srcFP, dstFP, false)
 		}
 	}), 0)
-	gutter.AddChild(newDirButton(left, right, "Move", func(src, dst *paneTabs) {
+	gutter.AddChild(newDirButton(app, left, right, locales.KeyGutterMove, func(src, dst *paneTabs) {
 		srcFP, ok1 := src.ActiveFilePane()
 		dstFP, ok2 := dst.ActiveFilePane()
 		if ok1 && ok2 {
 			doCopyOrMove(app, srcFP, dstFP, true)
 		}
 	}), 0)
-	gutter.AddChild(newDirButton(left, right, "Zip", func(src, dst *paneTabs) {
+	gutter.AddChild(newDirButton(app, left, right, locales.KeyGutterZip, func(src, dst *paneTabs) {
 		srcFP, ok1 := src.ActiveFilePane()
 		dstFP, ok2 := dst.ActiveFilePane()
 		if ok1 && ok2 {
 			doZip(app, srcFP, dstFP)
 		}
 	}), 0)
-	gutter.AddChild(newDirButton(left, right, "Unzip", func(src, dst *paneTabs) {
+	gutter.AddChild(newDirButton(app, left, right, locales.KeyGutterUnzip, func(src, dst *paneTabs) {
 		srcFP, ok1 := src.ActiveFilePane()
 		dstFP, ok2 := dst.ActiveFilePane()
 		if ok1 && ok2 {
@@ -979,17 +1037,22 @@ func newActionGutter(app *Graphite.Application, left, right *paneTabs) *Graphite
 // track live state.
 type dirButton struct {
 	Graphite.BaseWidget
+	app         *Graphite.Application
 	left, right *paneTabs
-	action      string
+	actionKey   string
 	onClick     func(src, dst *paneTabs)
 }
 
 // newDirButton creates a dirButton with Width 0, stretching it to fill
 // whatever width its parent Flex offers (see BaseWidget's zero/negative
-// width convention). A nil onClick renders it dimmed and inert.
-func newDirButton(left, right *paneTabs, action string, onClick func(src, dst *paneTabs)) *dirButton {
+// width convention). A nil onClick renders it dimmed and inert. actionKey
+// is a locales.Key* constant, resolved fresh in label() every frame —
+// the same live-retranslation-for-free pattern FilePane.Translate and
+// the F-key bar's OnBeforeDraw both use, since this label is already
+// recomputed every frame for the source/destination arrow anyway.
+func newDirButton(app *Graphite.Application, left, right *paneTabs, actionKey string, onClick func(src, dst *paneTabs)) *dirButton {
 	base := Graphite.NewBaseWidget(0, 0, 0, 1)
-	return &dirButton{BaseWidget: base, left: left, right: right, action: action, onClick: onClick}
+	return &dirButton{BaseWidget: base, app: app, left: left, right: right, actionKey: actionKey, onClick: onClick}
 }
 
 // srcDst returns (source, destination) for this click: always from
@@ -1006,10 +1069,11 @@ func (d *dirButton) srcDst() (src, dst *paneTabs) {
 // leading ("◀ Copy") when copying leftward — so the glyph itself points
 // toward where the files are actually going.
 func (d *dirButton) label() string {
+	action := d.app.T(d.actionKey)
 	if d.right.HasFocus() {
-		return "◀ " + d.action
+		return "◀ " + action
 	}
-	return d.action + " ▶"
+	return action + " ▶"
 }
 
 // DrawRelative implements Graphite.Widget. The label is centered in the
@@ -1081,6 +1145,7 @@ type statusBarState struct {
 // update from instead).
 type diskSpaceBar struct {
 	Graphite.BaseWidget
+	app   *Graphite.Application
 	state func() statusBarState
 }
 
@@ -1088,8 +1153,8 @@ type diskSpaceBar struct {
 // (the F-key bar itself, at Y=-1), leaving row -2 blank — the same
 // one-row gap the menu strip and nav row already have between them —
 // instead of the two rows touching directly.
-func newDiskSpaceBar(state func() statusBarState) *diskSpaceBar {
-	return &diskSpaceBar{BaseWidget: Graphite.NewBaseWidget(0, -3, 0, 1), state: state}
+func newDiskSpaceBar(app *Graphite.Application, state func() statusBarState) *diskSpaceBar {
+	return &diskSpaceBar{BaseWidget: Graphite.NewBaseWidget(0, -3, 0, 1), app: app, state: state}
 }
 
 // formatBytes renders a byte count in the largest binary unit (KiB, MiB,
@@ -1131,9 +1196,9 @@ func (d *diskSpaceBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) 
 
 	state := d.state()
 
-	taggedText := "No files tagged"
+	taggedText := d.app.T(locales.KeyStatusNoTagged)
 	if state.hasTagged {
-		taggedText = fmt.Sprintf("Tagged: %d item(s), %s", state.taggedCount, formatBytes(uint64(state.taggedSize)))
+		taggedText = d.app.T(locales.KeyStatusTagged, state.taggedCount, formatBytes(uint64(state.taggedSize)))
 	}
 	c.DrawTextBounded(d.AbsX, d.AbsY, taggedSegW, taggedText, theme.BgWindow, theme.FgWindow)
 
@@ -1146,9 +1211,9 @@ func (d *diskSpaceBar) DrawRelative(c *Graphite.Canvas, offX, offY, pW, pH int) 
 	dividerX2 := diskX + diskSegW
 	c.DrawCell(dividerX2, d.AbsY, "│", theme.BgWindow, theme.FgDisabled)
 
-	serverText := "Server: Local"
+	serverText := d.app.T(locales.KeyStatusServer, d.app.T(locales.KeyStatusServerLocal))
 	if state.remoteLabel != "" {
-		serverText = "Server: " + state.remoteLabel
+		serverText = d.app.T(locales.KeyStatusServer, state.remoteLabel)
 	}
 	c.DrawTextBounded(dividerX2+1, d.AbsY, serverSegW-1, serverText, theme.BgWindow, theme.FgDisabled)
 }
@@ -1164,13 +1229,13 @@ func (d *diskSpaceBar) drawDiskSegment(c *Graphite.Canvas, x, w int) {
 func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache diskUsageCache) {
 	theme := c.Theme()
 	if !cache.ok || cache.usage.Total == 0 {
-		c.DrawTextBounded(x, d.AbsY, w, "Disk: n/a", theme.BgWindow, theme.FgDisabled)
+		c.DrawTextBounded(x, d.AbsY, w, d.app.T(locales.KeyStatusDiskNA), theme.BgWindow, theme.FgDisabled)
 		return
 	}
 
 	used := cache.usage.Total - cache.usage.Free
 	usedPct := float64(used) / float64(cache.usage.Total) * 100
-	label := fmt.Sprintf("Disk: %s free of %s (%.0f%% used)", formatBytes(cache.usage.Free), formatBytes(cache.usage.Total), usedPct)
+	label := d.app.T(locales.KeyStatusDiskUsage, formatBytes(cache.usage.Free), formatBytes(cache.usage.Total), usedPct)
 
 	barW := w - len([]rune(label)) - 3
 	if barW < 10 {
@@ -1210,28 +1275,39 @@ func (d *diskSpaceBar) drawDiskSegmentUsage(c *Graphite.Canvas, x, w int, cache 
 // share one no-op-on-a-Terminal-tab behavior.
 func newFKeyBar(app *Graphite.Application, right *paneTabs, withFP func(func(*filepane.FilePane)) func(), withPanes func(func(src, dst *filepane.FilePane)) func()) *fkeybar.Bar {
 	bar := fkeybar.New(0, -1, []fkeybar.Key{
-		{Label: "F1", Text: "Info", OnClick: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
-		{Label: "F2", Text: "Rename", OnClick: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
-		{Label: "F3", Text: "Find", OnClick: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
-		{Label: "F4", Text: "Grep", OnClick: withFP(func(fp *filepane.FilePane) { showGrepSearch(app, fp) })},
-		{Label: "F5", Text: "Copy Right", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
-		{Label: "F6", Text: "Move Right", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
-		{Label: "F7", Text: "MkDir", OnClick: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
-		{Label: "F8", Text: "Delete", Role: fkeybar.RoleDanger, OnClick: withFP(func(fp *filepane.FilePane) { doDelete(app, fp) })},
-		{Label: "F9", Text: "Menu"},
-		{Label: "F10", Text: "Quit"},
+		{Label: "F1", OnClick: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
+		{Label: "F2", OnClick: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
+		{Label: "F3", OnClick: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
+		{Label: "F4", OnClick: withFP(func(fp *filepane.FilePane) { showGrepSearch(app, fp) })},
+		{Label: "F5", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
+		{Label: "F6", OnClick: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
+		{Label: "F7", OnClick: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
+		{Label: "F8", Role: fkeybar.RoleDanger, OnClick: withFP(func(fp *filepane.FilePane) { doDelete(app, fp) })},
+		{Label: "F9"},
+		{Label: "F10"},
 	})
-	// F5/F6's Text names the destination pane explicitly, kept current
-	// every frame the same way dirButton's own label does — there is no
-	// "focus changed" event to hook it from instead.
+	// Every key's Text (not just F5/F6's direction-qualified one) is
+	// recomputed from app.T on every single draw — the same per-frame
+	// pattern F5/F6's own "which pane is the destination" text already
+	// needed, extended to the whole bar so a locale change (see the Help
+	// menu's Language submenu in newMenuStrip) is reflected the very next
+	// frame with no separate "retranslate the F-key bar" step.
 	const copyIdx, moveIdx = 4, 5
 	bar.OnBeforeDraw = func() {
-		dir := "Right"
+		bar.Keys[0].Text = app.T(locales.KeyFKeyInfo)
+		bar.Keys[1].Text = app.T(locales.KeyFKeyRename)
+		bar.Keys[2].Text = app.T(locales.KeyFKeyFind)
+		bar.Keys[3].Text = app.T(locales.KeyFKeyGrep)
+		dir := app.T(locales.KeyDirectionRight)
 		if right.HasFocus() {
-			dir = "Left"
+			dir = app.T(locales.KeyDirectionLeft)
 		}
-		bar.Keys[copyIdx].Text = "Copy " + dir
-		bar.Keys[moveIdx].Text = "Move " + dir
+		bar.Keys[copyIdx].Text = app.T(locales.KeyFKeyCopy, dir)
+		bar.Keys[moveIdx].Text = app.T(locales.KeyFKeyMove, dir)
+		bar.Keys[6].Text = app.T(locales.KeyFKeyMkdir)
+		bar.Keys[7].Text = app.T(locales.KeyFKeyDelete)
+		bar.Keys[8].Text = app.T(locales.KeyFKeyMenu)
+		bar.Keys[9].Text = app.T(locales.KeyFKeyQuit)
 	}
 	return bar
 }
@@ -1244,69 +1320,111 @@ func newFKeyBar(app *Graphite.Application, right *paneTabs, withFP func(func(*fi
 // IsFocusable is forced back to false right after construction, same
 // reasoning as newNavButton.
 func newMenuStrip(app *Graphite.Application, left, right *paneTabs, active func() *paneTabs, withFP func(func(*filepane.FilePane)) func(), withPanes func(func(src, dst *filepane.FilePane)) func()) *Graphite.MenuStrip {
-	menu := Graphite.NewMenuStrip([]Graphite.MenuCategory{
-		{Label: "File", Items: []Graphite.MenuItem{
-			{Label: "File Info     F1", Action: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
-			{Label: "Rename        F2", Action: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
-			{Label: "Find          F3", Action: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
-			{Label: "Grep          F4", Action: withFP(func(fp *filepane.FilePane) { showGrepSearch(app, fp) })},
-			{Separator: true},
-			{Label: "Copy          F5", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
-			{Label: "Move          F6", Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
-			{Separator: true},
-			{Label: "New File", Action: withFP(func(fp *filepane.FilePane) { doNewFile(app, fp) })},
-			{Label: "New Folder    F7", Action: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
-			{Label: "Delete        F8", Action: withFP(func(fp *filepane.FilePane) { doDelete(app, fp) })},
-			{Separator: true},
-			{Label: "Quit         F10", Action: func() { requestQuit(app, left, right) }},
-		}},
-		{Label: "Mark", Items: []Graphite.MenuItem{
-			{Label: "Tag/Untag    Ins", Action: withFP(func(fp *filepane.FilePane) { fp.ToggleTag() })},
-			{Separator: true},
-			{Label: "Select All", Action: withFP(func(fp *filepane.FilePane) { fp.SelectAll() })},
-			{Label: "Deselect All", Action: withFP(func(fp *filepane.FilePane) { fp.DeselectAll() })},
-			{Label: "Invert Selection", Action: withFP(func(fp *filepane.FilePane) { fp.InvertSelection() })},
-		}},
-		{Label: "View", Items: []Graphite.MenuItem{
-			{Label: "Sort by Name", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByName) })},
-			{Label: "Sort by Extension", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByExt) })},
-			{Label: "Sort by Size", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortBySize) })},
-			{Label: "Sort by Date", Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByDate) })},
-			{Separator: true},
-			{Label: "Refresh", Action: withFP(func(fp *filepane.FilePane) { fp.Reload() })},
-		}},
-		{Label: "Tab", Items: []Graphite.MenuItem{
-			{Label: "Add", SubItems: []Graphite.MenuItem{
-				{Label: "New file list", Action: func() {
-					if fp, ok := active().ActiveFilePane(); ok {
-						active().AddFileList(fp.Path())
-					} else {
-						active().AddFileList(mustGetwd())
-					}
-				}},
-				{Label: "New terminal", Action: func() {
-					if err := active().AddTerminal(); err != nil {
-						app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
-					}
-				}},
+	// menu.Categories is rebuilt in place (see retranslateMenu) every time
+	// the Language submenu below changes app's Locale — a MenuItem.Label
+	// is otherwise a plain string fixed at construction time, unlike the
+	// F-key bar's Text (recomputed every frame via OnBeforeDraw) or a
+	// FilePane's headers (recomputed every frame via Translate), neither
+	// of which needs this. buildCategories/switchLocale/retranslateMenu
+	// are declared as vars up front, in that forward-reference order,
+	// purely so each closure below can already name the next one it
+	// calls — every var is assigned its real function before app.Run()
+	// ever lets one of them actually execute.
+	var menu *Graphite.MenuStrip
+	var buildCategories func() []Graphite.MenuCategory
+	var switchLocale func(Graphite.Locale)
+	var retranslateMenu func()
+
+	buildCategories = func() []Graphite.MenuCategory {
+		return []Graphite.MenuCategory{
+			{Label: app.T(locales.KeyMenuFile), Items: []Graphite.MenuItem{
+				{Label: app.T(locales.KeyMenuFileInfo), Action: withFP(func(fp *filepane.FilePane) { showFileInfo(app, fp) })},
+				{Label: app.T(locales.KeyMenuFileRename), Action: withFP(func(fp *filepane.FilePane) { doRename(app, fp) })},
+				{Label: app.T(locales.KeyMenuFileFind), Action: withFP(func(fp *filepane.FilePane) { showFindFiles(app, fp) })},
+				{Label: app.T(locales.KeyMenuFileGrep), Action: withFP(func(fp *filepane.FilePane) { showGrepSearch(app, fp) })},
+				{Separator: true},
+				{Label: app.T(locales.KeyMenuFileCopy), Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, false) })},
+				{Label: app.T(locales.KeyMenuFileMove), Action: withPanes(func(src, dst *filepane.FilePane) { doCopyOrMove(app, src, dst, true) })},
+				{Separator: true},
+				{Label: app.T(locales.KeyMenuFileNew), Action: withFP(func(fp *filepane.FilePane) { doNewFile(app, fp) })},
+				{Label: app.T(locales.KeyMenuFileMkdir), Action: withFP(func(fp *filepane.FilePane) { doMkdir(app, fp) })},
+				{Label: app.T(locales.KeyMenuFileDelete), Action: withFP(func(fp *filepane.FilePane) { doDelete(app, fp) })},
+				{Separator: true},
+				{Label: app.T(locales.KeyMenuFileQuit), Action: func() { requestQuit(app, left, right) }},
 			}},
-			{Separator: true},
-			{Label: "Pin/Unpin Tab", Action: func() { active().group.TogglePin(active().group.Active) }},
-			{Label: "Close Tab", Action: func() { active().CloseTabAt(active().group.Active) }},
-			{Separator: true},
-			{Label: "Manage Tabs...", Action: func() { showManageTabs(app, left, right) }},
-		}},
-		{Label: "Network", Items: []Graphite.MenuItem{
-			{Label: "Create Connection...", Action: func() {
-				showConnectDialog(app, active(), nil, "/", nil)
+			{Label: app.T(locales.KeyMenuMark), Items: []Graphite.MenuItem{
+				{Label: app.T(locales.KeyMenuMarkToggle), Action: withFP(func(fp *filepane.FilePane) { fp.ToggleTag() })},
+				{Separator: true},
+				{Label: app.T(locales.KeyMenuMarkAll), Action: withFP(func(fp *filepane.FilePane) { fp.SelectAll() })},
+				{Label: app.T(locales.KeyMenuMarkNone), Action: withFP(func(fp *filepane.FilePane) { fp.DeselectAll() })},
+				{Label: app.T(locales.KeyMenuMarkInvert), Action: withFP(func(fp *filepane.FilePane) { fp.InvertSelection() })},
 			}},
-			{Label: "Reconnect", Action: func() { doReconnect(app, active()) }},
-			{Label: "Disconnect", Action: func() { doDisconnect(app, active()) }},
-		}},
-		{Label: "Help", Items: []Graphite.MenuItem{
-			{Label: "About", Action: func() { showAbout(app) }},
-		}},
-	})
+			{Label: app.T(locales.KeyMenuView), Items: []Graphite.MenuItem{
+				{Label: app.T(locales.KeyMenuViewSortName), Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByName) })},
+				{Label: app.T(locales.KeyMenuViewSortExt), Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByExt) })},
+				{Label: app.T(locales.KeyMenuViewSortSize), Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortBySize) })},
+				{Label: app.T(locales.KeyMenuViewSortDate), Action: withFP(func(fp *filepane.FilePane) { fp.SetSort(filepane.SortByDate) })},
+				{Separator: true},
+				{Label: app.T(locales.KeyMenuViewRefresh), Action: withFP(func(fp *filepane.FilePane) { fp.Reload() })},
+			}},
+			{Label: app.T(locales.KeyMenuTab), Items: []Graphite.MenuItem{
+				{Label: app.T(locales.KeyMenuTabAdd), SubItems: []Graphite.MenuItem{
+					{Label: app.T(locales.KeyMenuTabAddFileList), Action: func() {
+						if fp, ok := active().ActiveFilePane(); ok {
+							active().AddFileList(fp.Path())
+						} else {
+							active().AddFileList(mustGetwd())
+						}
+					}},
+					{Label: app.T(locales.KeyMenuTabAddTerminal), Action: func() {
+						if err := active().AddTerminal(); err != nil {
+							app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
+						}
+					}},
+				}},
+				{Separator: true},
+				{Label: app.T(locales.KeyMenuTabPinUnpin), Action: func() { active().group.TogglePin(active().group.Active) }},
+				{Label: app.T(locales.KeyMenuTabClose), Action: func() { active().CloseTabAt(active().group.Active) }},
+				{Separator: true},
+				{Label: app.T(locales.KeyMenuTabManage), Action: func() { showManageTabs(app, left, right) }},
+			}},
+			{Label: app.T(locales.KeyMenuNetwork), Items: []Graphite.MenuItem{
+				{Label: app.T(locales.KeyMenuNetworkCreate), Action: func() {
+					showConnectDialog(app, active(), nil, "/", nil)
+				}},
+				{Label: app.T(locales.KeyMenuNetworkReconnect), Action: func() { doReconnect(app, active()) }},
+				{Label: app.T(locales.KeyMenuNetworkDisconnect), Action: func() { doDisconnect(app, active()) }},
+			}},
+			{Label: app.T(locales.KeyMenuHelp), Items: []Graphite.MenuItem{
+				{Label: app.T(locales.KeyMenuHelpLanguage), SubItems: []Graphite.MenuItem{
+					// Each language's own name is never translated — a
+					// picker always lists its options in their own
+					// language (an English speaker still recognizes
+					// "Українська" as a name, not as English text to
+					// read), the same convention every OS/app language
+					// switcher follows.
+					{Label: "English", Action: func() { switchLocale(Graphite.LocaleEnglish) }},
+					{Label: "Українська", Action: func() { switchLocale(Graphite.LocaleUkrainian) }},
+					{Label: "Русский", Action: func() { switchLocale(Graphite.LocaleRussian) }},
+					{Label: "Nederlands", Action: func() { switchLocale(Graphite.LocaleDutch) }},
+				}},
+				{Separator: true},
+				{Label: app.T(locales.KeyMenuHelpAbout), Action: func() { showAbout(app) }},
+			}},
+		}
+	}
+
+	switchLocale = func(loc Graphite.Locale) {
+		app.SetLocale(loc)
+		saveTabs(left, right) // persists immediately, not just at quit — see installSignalSaveHandler's own reasoning
+		retranslateMenu()
+	}
+
+	retranslateMenu = func() {
+		menu.Categories = buildCategories()
+	}
+
+	menu = Graphite.NewMenuStrip(buildCategories())
 	menu.IsFocusable = false
 	menu.BgColor = Graphite.Hex("#FFD23D") // amber, per the project owner — bar and dropdown alike; text auto-contrasts
 	return menu
@@ -1329,7 +1447,7 @@ func mustGetwd() string {
 // tabs first (see saveTabs), so "protected from reset on restart" holds
 // even for a quit the user didn't cancel out of.
 func requestQuit(app *Graphite.Application, left, right *paneTabs) {
-	Graphite.ShowConfirm(app, " Quit ", "Quit Diskette?", Graphite.BtnDanger, func() {
+	Graphite.ShowConfirm(app, app.T(locales.KeyQuitTitle), app.T(locales.KeyQuitMessage), Graphite.BtnDanger, func() {
 		saveAndQuit(app, left, right)
 	})
 }
@@ -1382,25 +1500,25 @@ func showAbout(app *Graphite.Application) {
 	// room for the Close button below it, not just enough for the info
 	// text — a shorter window here left the button drawn on top of the
 	// image's own bottom rows.
-	mod := Graphite.NewWindow(94, 27, " About ")
+	mod := Graphite.NewWindow(94, 27, " "+app.T(locales.KeyMenuHelpAbout)+" ")
 
 	if logo, err := Graphite.ReadGph(bytes.NewReader(assets.DisketteLogo)); err == nil {
 		mod.AddWidget(Graphite.NewImage(2, 2, logo))
 	}
 
 	info := Graphite.NewLabel(40, 2,
-		"Diskette v.0.1.0\n\n"+
-			"A cross-platform dual-pane file manager,\n"+
-			"with SFTP and FTP/FTPS remote connections.\n"+
-			"Provides archiving features and build with\n"+
-			"lightweight Graphite TUI framework.\n\n"+
+		app.T(locales.KeyAboutVersion, "0.1.0")+"\n\n"+
+			app.T(locales.KeyAboutTagline1)+"\n"+
+			app.T(locales.KeyAboutTagline2)+"\n"+
+			app.T(locales.KeyAboutTagline3)+"\n"+
+			app.T(locales.KeyAboutTagline4)+"\n\n"+
 			"Copyright © 2026 Yehor Oblyvantsov\n"+
 			"github.com/yeoblyv/diskette\n\n"+
-			"Beta release.")
+			app.T(locales.KeyAboutBeta))
 	info.Width = 44
 	mod.AddWidget(info)
 
-	mod.AddWidget(Graphite.NewButton(2, -2, "Close", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyClose), Graphite.BtnDefault, func() {
 		app.CloseModal()
 	}))
 
@@ -1419,10 +1537,9 @@ func showFileInfo(app *Graphite.Application, fp *filepane.FilePane) {
 
 	if len(paths) > 1 {
 		count, size, _ := fp.TaggedSummary()
-		mod := Graphite.NewWindow(44, 10, " File Info ")
-		mod.AddWidget(Graphite.NewLabel(2, 1, fmt.Sprintf(
-			"%d items selected\n\nTotal size: %s", count, formatBytes(uint64(size)))))
-		mod.AddWidget(Graphite.NewButton(2, -2, "Close", Graphite.BtnDefault, func() {
+		mod := Graphite.NewWindow(44, 10, app.T(locales.KeyFileInfoTitle))
+		mod.AddWidget(Graphite.NewLabel(2, 1, app.T(locales.KeyFileInfoMulti, count, formatBytes(uint64(size)))))
+		mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyClose), Graphite.BtnDefault, func() {
 			app.CloseModal()
 		}))
 		app.SetModal(mod)
@@ -1431,29 +1548,35 @@ func showFileInfo(app *Graphite.Application, fp *filepane.FilePane) {
 
 	info, err := fileinfo.Stat(paths[0])
 	if err != nil {
-		app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+		app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 		return
 	}
 
-	kind := "File"
+	kind := app.T(locales.KeyFileInfoKindFile)
 	sizeStr := formatBytes(uint64(info.Size))
 	if info.IsDir {
-		kind, sizeStr = "Directory", "—"
+		kind, sizeStr = app.T(locales.KeyFileInfoKindDir), "—"
 	}
-	created := "not available on this filesystem"
+	created := app.T(locales.KeyFileInfoNotAvail)
 	if info.CreatedKnown {
 		created = info.Created.Format("02.01.2006 15:04:05")
 	}
 
 	const layout = "02.01.2006 15:04:05"
-	text := fmt.Sprintf(
-		"Name:        %s\nType:        %s\nSize:        %s\nPermissions: %s\n\nModified:    %s\nAccessed:    %s\nCreated:     %s",
-		info.Name, kind, sizeStr, info.Mode.String(),
-		info.Modified.Format(layout), info.Accessed.Format(layout), created)
+	text := strings.Join([]string{
+		app.T(locales.KeyFileInfoName, info.Name),
+		app.T(locales.KeyFileInfoType, kind),
+		app.T(locales.KeyFileInfoSize, sizeStr),
+		app.T(locales.KeyFileInfoPerms, info.Mode.String()),
+		"",
+		app.T(locales.KeyFileInfoModified, info.Modified.Format(layout)),
+		app.T(locales.KeyFileInfoAccessed, info.Accessed.Format(layout)),
+		app.T(locales.KeyFileInfoCreated, created),
+	}, "\n")
 
-	mod := Graphite.NewWindow(56, 15, " File Info ")
+	mod := Graphite.NewWindow(56, 15, app.T(locales.KeyFileInfoTitle))
 	mod.AddWidget(Graphite.NewLabel(2, 1, text))
-	mod.AddWidget(Graphite.NewButton(2, -2, "Close", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyClose), Graphite.BtnDefault, func() {
 		app.CloseModal()
 	}))
 	app.SetModal(mod)
@@ -1463,22 +1586,22 @@ func showFileInfo(app *Graphite.Application, fp *filepane.FilePane) {
 // recurse/case-sensitive toggles) that hands off to runFileSearch once
 // submitted.
 func showFindFiles(app *Graphite.Application, fp *filepane.FilePane) {
-	mod := Graphite.NewWindow(60, 14, " Find Files ")
+	mod := Graphite.NewWindow(60, 14, app.T(locales.KeyFindTitle))
 
-	rootInput := Graphite.NewInputBox(2, 1, 54, "Search in: ")
+	rootInput := Graphite.NewInputBox(2, 1, 54, app.T(locales.KeySearchIn))
 	rootInput.Value = fp.Path()
 	mod.AddWidget(rootInput)
 
-	maskInput := Graphite.NewInputBox(2, 3, 54, "Name mask: ")
+	maskInput := Graphite.NewInputBox(2, 3, 54, app.T(locales.KeyNameMask))
 	maskInput.Value = "*"
 	mod.AddWidget(maskInput)
 
-	recurseBox := Graphite.NewCheckbox(2, 5, "Search subfolders", true)
+	recurseBox := Graphite.NewCheckbox(2, 5, app.T(locales.KeySearchSubfolders), true)
 	mod.AddWidget(recurseBox)
-	caseBox := Graphite.NewCheckbox(2, 6, "Case sensitive", false)
+	caseBox := Graphite.NewCheckbox(2, 6, app.T(locales.KeyCaseSensitive), false)
 	mod.AddWidget(caseBox)
 
-	mod.AddWidget(Graphite.NewButton(2, -2, "Search", Graphite.BtnSuccess, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeySearch), Graphite.BtnSuccess, func() {
 		app.CloseModal()
 		runFileSearch(app, fp, search.Options{
 			Mask:          maskInput.Value,
@@ -1486,7 +1609,7 @@ func showFindFiles(app *Graphite.Application, fp *filepane.FilePane) {
 			CaseSensitive: caseBox.Checked,
 		}, rootInput.Value)
 	}))
-	mod.AddWidget(Graphite.NewButton(14, -2, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(14, -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		app.CloseModal()
 	}))
 
@@ -1499,8 +1622,8 @@ func showFindFiles(app *Graphite.Application, fp *filepane.FilePane) {
 // FilePane.SetFound, so it reads as a search result rather than an
 // ordinary cursor move.
 func runFileSearch(app *Graphite.Application, fp *filepane.FilePane, opts search.Options, root string) {
-	mod := Graphite.NewWindow(64, 20, " Find Files ")
-	status := Graphite.NewLabel(2, 1, "Searching…")
+	mod := Graphite.NewWindow(64, 20, app.T(locales.KeyFindResultsTitle))
+	status := Graphite.NewLabel(2, 1, app.T(locales.KeySearching))
 	mod.AddWidget(status)
 
 	results := Graphite.NewListBox(2, 3, -4, -4, nil, func(_ int, path string) {
@@ -1517,7 +1640,7 @@ func runFileSearch(app *Graphite.Application, fp *filepane.FilePane, opts search
 	mod.AddWidget(results)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		cancel()
 		app.CloseModal()
 	}))
@@ -1531,9 +1654,9 @@ func runFileSearch(app *Graphite.Application, fp *filepane.FilePane, opts search
 			app.Invoke(func() {
 				results.Items = snapshot
 				if done {
-					status.SetText(fmt.Sprintf("%d found", len(snapshot)))
+					status.SetText(app.T(locales.KeySearchFound, len(snapshot)))
 				} else {
-					status.SetText(fmt.Sprintf("Searching… %d found", len(snapshot)))
+					status.SetText(app.T(locales.KeySearchingFound, len(snapshot)))
 				}
 			})
 		}
@@ -1547,7 +1670,7 @@ func runFileSearch(app *Graphite.Application, fp *filepane.FilePane, opts search
 		})
 		flush(true)
 		if err != nil && ctx.Err() == nil {
-			app.Invoke(func() { app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger) })
+			app.Invoke(func() { app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger) })
 		}
 	}()
 }
@@ -1557,27 +1680,27 @@ func runFileSearch(app *Graphite.Application, fp *filepane.FilePane, opts search
 // name mask to restrict which files are searched, and the same
 // recurse/case-sensitive choices showFindFiles offers.
 func showGrepSearch(app *Graphite.Application, fp *filepane.FilePane) {
-	mod := Graphite.NewWindow(60, 16, " Grep ")
+	mod := Graphite.NewWindow(60, 16, app.T(locales.KeyGrepTitle))
 
-	rootInput := Graphite.NewInputBox(2, 1, 54, "Search in: ")
+	rootInput := Graphite.NewInputBox(2, 1, 54, app.T(locales.KeySearchIn))
 	rootInput.Value = fp.Path()
 	mod.AddWidget(rootInput)
 
-	patternInput := Graphite.NewInputBox(2, 3, 54, "Pattern: ")
+	patternInput := Graphite.NewInputBox(2, 3, 54, app.T(locales.KeyGrepPattern))
 	mod.AddWidget(patternInput)
 
-	maskInput := Graphite.NewInputBox(2, 5, 54, "Name mask: ")
+	maskInput := Graphite.NewInputBox(2, 5, 54, app.T(locales.KeyNameMask))
 	maskInput.Value = "*"
 	mod.AddWidget(maskInput)
 
-	recurseBox := Graphite.NewCheckbox(2, 7, "Search subfolders", true)
+	recurseBox := Graphite.NewCheckbox(2, 7, app.T(locales.KeySearchSubfolders), true)
 	mod.AddWidget(recurseBox)
-	caseBox := Graphite.NewCheckbox(2, 8, "Case sensitive", false)
+	caseBox := Graphite.NewCheckbox(2, 8, app.T(locales.KeyCaseSensitive), false)
 	mod.AddWidget(caseBox)
-	regexBox := Graphite.NewCheckbox(2, 9, "Regular expression", false)
+	regexBox := Graphite.NewCheckbox(2, 9, app.T(locales.KeyGrepRegex), false)
 	mod.AddWidget(regexBox)
 
-	mod.AddWidget(Graphite.NewButton(2, -2, "Search", Graphite.BtnSuccess, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeySearch), Graphite.BtnSuccess, func() {
 		if patternInput.Value == "" {
 			return
 		}
@@ -1590,7 +1713,7 @@ func showGrepSearch(app *Graphite.Application, fp *filepane.FilePane) {
 			Recursive:     recurseBox.Checked,
 		}, rootInput.Value)
 	}))
-	mod.AddWidget(Graphite.NewButton(14, -2, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(14, -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		app.CloseModal()
 	}))
 
@@ -1602,8 +1725,8 @@ func showGrepSearch(app *Graphite.Application, fp *filepane.FilePane) {
 // live-updating list, one per matching line; selecting one navigates fp
 // to that file the same way runFileSearch's results do.
 func runGrepSearch(app *Graphite.Application, fp *filepane.FilePane, opts grep.Options, root string) {
-	mod := Graphite.NewWindow(78, 20, " Grep ")
-	status := Graphite.NewLabel(2, 1, "Searching…")
+	mod := Graphite.NewWindow(78, 20, app.T(locales.KeyGrepResultsTitle))
+	status := Graphite.NewLabel(2, 1, app.T(locales.KeySearching))
 	mod.AddWidget(status)
 
 	// shown is only ever written from within app.Invoke and read from
@@ -1629,7 +1752,7 @@ func runGrepSearch(app *Graphite.Application, fp *filepane.FilePane, opts grep.O
 	mod.AddWidget(results)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		cancel()
 		app.CloseModal()
 	}))
@@ -1646,9 +1769,9 @@ func runGrepSearch(app *Graphite.Application, fp *filepane.FilePane, opts grep.O
 				shown = snapshotMatches
 				results.Items = snapshotLines
 				if done {
-					status.SetText(fmt.Sprintf("%d found", len(snapshotLines)))
+					status.SetText(app.T(locales.KeySearchFound, len(snapshotLines)))
 				} else {
-					status.SetText(fmt.Sprintf("Searching… %d found", len(snapshotLines)))
+					status.SetText(app.T(locales.KeySearchingFound, len(snapshotLines)))
 				}
 			})
 		}
@@ -1663,9 +1786,24 @@ func runGrepSearch(app *Graphite.Application, fp *filepane.FilePane, opts grep.O
 		})
 		flush(true)
 		if err != nil && ctx.Err() == nil {
-			app.Invoke(func() { app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger) })
+			app.Invoke(func() { app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger) })
 		}
 	}()
+}
+
+// nextButtonX returns where the next button in a horizontal row should
+// start, given the previous one's own X and its label: wide enough for
+// that button's own rendered "[ label ]" plus a 2-column gap, so two
+// buttons never collide regardless of how much longer a translation runs
+// than the English word a hand-picked offset (e.g. the old fixed 14, 21,
+// 30 in a Yes/No/Rename/Cancel row) was originally tuned for — Ukrainian
+// and Russian in particular run noticeably longer than English for verbs
+// like "Rename"/"Overwrite". Graphite's Button itself renders exactly
+// "[ " + label + " ]", so this mirrors that layout rather than
+// introducing a second convention.
+func nextButtonX(prevX int, prevLabel string) int {
+	const brackets, gap = 4, 2 // "[ " + " ]" is 4 columns; 2 columns of breathing room
+	return prevX + len([]rune(prevLabel)) + brackets + gap
 }
 
 // trimLeadingSeparators strips leading path separators, for turning the
@@ -1734,9 +1872,9 @@ func (p *pathBar) HandleEvent(ev Graphite.Event) {
 // than a persistent input row, precisely so it never becomes a third
 // top-level focusable widget (see newNavButton).
 func promptGoTo(app *Graphite.Application, fp *filepane.FilePane) {
-	Graphite.ShowTextEditor(app, " Go to folder ", "Path:", fp.Path(), func(path string) {
+	Graphite.ShowTextEditor(app, app.T(locales.KeyGotoFolderTitle), app.T(locales.KeyPath), fp.Path(), func(path string) {
 		if _, err := fp.FS.Stat(context.Background(), path); err != nil {
-			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+			app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 			return
 		}
 		fp.SetPath(path)
@@ -1753,12 +1891,12 @@ func promptChooseRoot(app *Graphite.Application, fp *filepane.FilePane) {
 	if height > 18 {
 		height = 18
 	}
-	mod := Graphite.NewWindow(34, height, " Choose root ")
+	mod := Graphite.NewWindow(34, height, app.T(locales.KeyChooseRootTitle))
 	mod.AddWidget(Graphite.NewListBox(2, 1, -2, -3, items, func(_ int, item string) {
 		app.CloseModal()
 		fp.SetPath(item)
 	}))
-	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		app.CloseModal()
 	}))
 	app.SetModal(mod)
@@ -1770,12 +1908,12 @@ func doRename(app *Graphite.Application, fp *filepane.FilePane) {
 	if !ok {
 		return
 	}
-	Graphite.ShowTextEditor(app, " Rename ", "New name:", entry.Name, func(newName string) {
+	Graphite.ShowTextEditor(app, app.T(locales.KeyRenameTitle), app.T(locales.KeyNewName), entry.Name, func(newName string) {
 		ctx := context.Background()
 		oldPath := fp.FS.Join(fp.Path(), entry.Name)
 		newPath := fp.FS.Join(fp.Path(), newName)
 		if err := fp.FS.Rename(ctx, oldPath, newPath); err != nil {
-			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+			app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 		}
 		fp.Reload()
 	})
@@ -1789,20 +1927,20 @@ func doRename(app *Graphite.Application, fp *filepane.FilePane) {
 // existing file just because its name was reused would be a real way to
 // lose data.
 func doNewFile(app *Graphite.Application, fp *filepane.FilePane) {
-	Graphite.ShowTextEditor(app, " New file ", "Name:", "", func(name string) {
+	Graphite.ShowTextEditor(app, app.T(locales.KeyNewFileTitle), app.T(locales.KeyName), "", func(name string) {
 		ctx := context.Background()
 		path := fp.FS.Join(fp.Path(), name)
 		if _, err := fp.FS.Stat(ctx, path); err == nil {
-			app.ShowMessage(" Error ", "A file or folder named \""+name+"\" already exists.", Graphite.BtnDanger)
+			app.ShowMessage(app.T(locales.KeyErrorTitle), app.T(locales.KeyAlreadyExists, name), Graphite.BtnDanger)
 			return
 		}
 		w, err := fp.FS.Create(ctx, path)
 		if err != nil {
-			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+			app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 			return
 		}
 		if err := w.Close(); err != nil {
-			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+			app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 			return
 		}
 		fp.Reload()
@@ -1812,9 +1950,9 @@ func doNewFile(app *Graphite.Application, fp *filepane.FilePane) {
 
 // doMkdir implements F7: create a new directory inside fp's current path.
 func doMkdir(app *Graphite.Application, fp *filepane.FilePane) {
-	Graphite.ShowTextEditor(app, " New folder ", "Name:", "", func(name string) {
+	Graphite.ShowTextEditor(app, app.T(locales.KeyNewFolderTitle), app.T(locales.KeyName), "", func(name string) {
 		if err := fp.FS.Mkdir(context.Background(), fp.FS.Join(fp.Path(), name)); err != nil {
-			app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+			app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 		}
 		fp.Reload()
 	})
@@ -1830,8 +1968,8 @@ func doDelete(app *Graphite.Application, fp *filepane.FilePane) {
 	if len(paths) == 0 {
 		return
 	}
-	msg := fmt.Sprintf("Delete %d item(s)?", len(paths))
-	Graphite.ShowConfirm(app, " Delete ", msg, Graphite.BtnDanger, func() {
+	msg := app.T(locales.KeyDeleteMessage, len(paths))
+	Graphite.ShowConfirm(app, app.T(locales.KeyDeleteTitle), msg, Graphite.BtnDanger, func() {
 		go func() {
 			ctx := context.Background()
 			var firstErr error
@@ -1843,7 +1981,7 @@ func doDelete(app *Graphite.Application, fp *filepane.FilePane) {
 			app.Invoke(func() {
 				fp.Reload()
 				if firstErr != nil {
-					app.ShowMessage(" Error ", firstErr.Error(), Graphite.BtnDanger)
+					app.ShowMessage(app.T(locales.KeyErrorTitle), firstErr.Error(), Graphite.BtnDanger)
 				}
 			})
 		}()
@@ -1861,9 +1999,9 @@ func doCopyOrMove(app *Graphite.Application, src, dst *filepane.FilePane, move b
 		return
 	}
 
-	title := " Copy "
+	title := app.T(locales.KeyCopyTitle)
 	if move {
-		title = " Move "
+		title = app.T(locales.KeyMoveTitle)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1881,7 +2019,7 @@ func doCopyOrMove(app *Graphite.Application, src, dst *filepane.FilePane, move b
 	// its LastH at 0, leaving it focusable and Enter-triggerable but
 	// never clickable (HitTest requires LastH > 0). See graphite's
 	// ShowConfirm for the same fix and fuller reasoning.
-	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		cancel()
 	}))
 	app.SetModal(mod)
@@ -1918,7 +2056,7 @@ func doCopyOrMove(app *Graphite.Application, src, dst *filepane.FilePane, move b
 			src.Reload()
 			dst.Reload()
 			if runErr != nil && runErr != copyengine.ErrCanceledByUser && ctx.Err() == nil {
-				app.ShowMessage(" Error ", runErr.Error(), Graphite.BtnDanger)
+				app.ShowMessage(app.T(locales.KeyErrorTitle), runErr.Error(), Graphite.BtnDanger)
 			}
 		})
 	}()
@@ -1945,7 +2083,7 @@ func doZip(app *Graphite.Application, src, dst *filepane.FilePane) {
 		}
 	}
 
-	Graphite.ShowTextEditor(app, " Zip ", "Archive name:", defaultName, func(name string) {
+	Graphite.ShowTextEditor(app, app.T(locales.KeyZipTitle), app.T(locales.KeyArchiveName), defaultName, func(name string) {
 		if name == "" {
 			return
 		}
@@ -1955,12 +2093,12 @@ func doZip(app *Graphite.Application, src, dst *filepane.FilePane) {
 		archivePath := dst.FS.Join(dst.Path(), name)
 
 		start := func() {
-			runArchiveTask(app, " Zip ", src, dst, func(ctx context.Context, onProgress archiveengine.ProgressFunc) error {
+			runArchiveTask(app, app.T(locales.KeyZipTitle), src, dst, func(ctx context.Context, onProgress archiveengine.ProgressFunc) error {
 				return archiveengine.CreateZip(ctx, src.FS, paths, dst.FS, archivePath, onProgress)
 			})
 		}
 		if _, err := dst.FS.Stat(context.Background(), archivePath); err == nil {
-			Graphite.ShowConfirm(app, " Zip ", name+" already exists. Overwrite?", Graphite.BtnDanger, start)
+			Graphite.ShowConfirm(app, app.T(locales.KeyZipTitle), app.T(locales.KeyArchiveOverwrite, name), Graphite.BtnDanger, start)
 			return
 		}
 		start()
@@ -1982,12 +2120,12 @@ func doUnzip(app *Graphite.Application, src, dst *filepane.FilePane) {
 
 	for _, p := range paths {
 		if archiveengine.DetectFormat(p) == archiveengine.FormatUnknown {
-			app.ShowMessage(" Error ", "Not a recognized archive: "+p, Graphite.BtnDanger)
+			app.ShowMessage(app.T(locales.KeyErrorTitle), app.T(locales.KeyNotAnArchive, p), Graphite.BtnDanger)
 			return
 		}
 	}
 
-	runArchiveTask(app, " Unzip ", src, dst, func(ctx context.Context, onProgress archiveengine.ProgressFunc) error {
+	runArchiveTask(app, app.T(locales.KeyUnzipTitle), src, dst, func(ctx context.Context, onProgress archiveengine.ProgressFunc) error {
 		for _, p := range paths {
 			if err := archiveengine.ExtractArchive(ctx, src.FS, p, dst.FS, dst.Path(), onProgress); err != nil {
 				return err
@@ -2010,7 +2148,7 @@ func runArchiveTask(app *Graphite.Application, title string, src, dst *filepane.
 	mod := Graphite.NewWindow(50, 9, title)
 	mod.AddWidget(progressLbl)
 	mod.AddWidget(bar)
-	mod.AddWidget(Graphite.NewButton(2, -2, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		cancel()
 	}))
 	app.SetModal(mod)
@@ -2031,7 +2169,7 @@ func runArchiveTask(app *Graphite.Application, title string, src, dst *filepane.
 			src.Reload()
 			dst.Reload()
 			if runErr != nil && ctx.Err() == nil {
-				app.ShowMessage(" Error ", runErr.Error(), Graphite.BtnDanger)
+				app.ShowMessage(app.T(locales.KeyErrorTitle), runErr.Error(), Graphite.BtnDanger)
 			}
 		})
 	}()
@@ -2042,11 +2180,17 @@ func runArchiveTask(app *Graphite.Application, title string, src, dst *filepane.
 // main loop (the caller is expected to reach it via Application.Invoke,
 // since copyengine.Run calls its ResolveFunc from a background goroutine).
 func showConflictModal(app *Graphite.Application, c copyengine.Conflict, respond func(copyengine.Resolution)) {
-	mod := Graphite.NewWindow(56, 12, " Conflict ")
-	mod.AddWidget(Graphite.NewLabel(2, 1, "Already exists:"))
+	// Width 84, not the original 56: wide enough for all four buttons'
+	// Ukrainian labels (the longest translation of this row across
+	// en/uk/ru/nl) laid out via nextButtonX, accounting for Window's own
+	// default PaddingX (4 on each side, so only width-8 is actually
+	// available to children) — without that margin the row still ran a
+	// few columns past the window's own right edge.
+	mod := Graphite.NewWindow(84, 12, app.T(locales.KeyConflictTitle))
+	mod.AddWidget(Graphite.NewLabel(2, 1, app.T(locales.KeyConflictExists)))
 	mod.AddWidget(Graphite.NewLabel(2, 2, c.Path))
 
-	applyAll := Graphite.NewCheckbox(2, 4, "Apply to all", false)
+	applyAll := Graphite.NewCheckbox(2, 4, app.T(locales.KeyConflictApplyAll), false)
 	mod.AddWidget(applyAll)
 
 	resolve := func(action copyengine.ConflictAction) {
@@ -2054,19 +2198,27 @@ func showConflictModal(app *Graphite.Application, c copyengine.Conflict, respond
 		respond(copyengine.Resolution{Action: action, ForAll: applyAll.Checked})
 	}
 
-	mod.AddWidget(Graphite.NewButton(2, 6, "Overwrite", Graphite.BtnDanger, func() {
+	overwriteLabel := app.T(locales.KeyConflictOverwrite)
+	skipLabel := app.T(locales.KeyConflictSkip)
+	renameLabel := app.T(locales.KeyConflictRename)
+	overwriteX := 2
+	skipX := nextButtonX(overwriteX, overwriteLabel)
+	renameX := nextButtonX(skipX, skipLabel)
+	cancelX := nextButtonX(renameX, renameLabel)
+
+	mod.AddWidget(Graphite.NewButton(overwriteX, 6, overwriteLabel, Graphite.BtnDanger, func() {
 		resolve(copyengine.Overwrite)
 	}))
-	mod.AddWidget(Graphite.NewButton(14, 6, "Skip", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(skipX, 6, skipLabel, Graphite.BtnDefault, func() {
 		resolve(copyengine.Skip)
 	}))
-	mod.AddWidget(Graphite.NewButton(21, 6, "Rename", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(renameX, 6, renameLabel, Graphite.BtnDefault, func() {
 		app.CloseModal() // this conflict modal
-		Graphite.ShowTextEditor(app, " Rename ", "New name:", "", func(newName string) {
+		Graphite.ShowTextEditor(app, app.T(locales.KeyRenameTitle), app.T(locales.KeyNewName), "", func(newName string) {
 			respond(copyengine.Resolution{Action: copyengine.Rename, NewName: newName, ForAll: applyAll.Checked})
 		})
 	}))
-	mod.AddWidget(Graphite.NewButton(30, 6, "Cancel", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(cancelX, 6, app.T(locales.KeyCancel), Graphite.BtnDefault, func() {
 		resolve(copyengine.Cancel)
 	}))
 
@@ -2079,10 +2231,10 @@ func showConflictModal(app *Graphite.Application, c copyengine.Conflict, respond
 // path to "protect this from being reset on restart" rather than needing
 // a separate button per row), plus a small add/close toolbar under each.
 func showManageTabs(app *Graphite.Application, left, right *paneTabs) {
-	mod := Graphite.NewWindow(74, 18, " Manage Tabs ")
+	mod := Graphite.NewWindow(74, 18, app.T(locales.KeyManageTabsTitle))
 
-	mod.AddWidget(Graphite.NewLabel(2, 1, "Left"))
-	mod.AddWidget(Graphite.NewLabel(38, 1, "Right"))
+	mod.AddWidget(Graphite.NewLabel(2, 1, app.T(locales.KeyManageTabsLeft)))
+	mod.AddWidget(Graphite.NewLabel(38, 1, app.T(locales.KeyManageTabsRight)))
 
 	// Height -6, not a fixed number: like every other button row anchored
 	// from the bottom in this project (see doCopyOrMove's progress modal),
@@ -2108,7 +2260,7 @@ func showManageTabs(app *Graphite.Application, left, right *paneTabs) {
 	// avoids: a fixed positive row number silently overlapping a
 	// bottom-anchored one once PaddingY is accounted for).
 	addRow := func(x int, p *paneTabs, list *Graphite.ListBox) {
-		mod.AddWidget(Graphite.NewButton(x, -4, "+ Files", Graphite.BtnDefault, func() {
+		mod.AddWidget(Graphite.NewButton(x, -4, app.T(locales.KeyManageTabsAddFiles), Graphite.BtnDefault, func() {
 			path := mustGetwd()
 			if fp, ok := p.ActiveFilePane(); ok {
 				path = fp.Path()
@@ -2116,14 +2268,14 @@ func showManageTabs(app *Graphite.Application, left, right *paneTabs) {
 			p.AddFileList(path)
 			refresh()
 		}))
-		mod.AddWidget(Graphite.NewButton(x+11, -4, "+ Term", Graphite.BtnDefault, func() {
+		mod.AddWidget(Graphite.NewButton(x+11, -4, app.T(locales.KeyManageTabsAddTerm), Graphite.BtnDefault, func() {
 			if err := p.AddTerminal(); err != nil {
-				app.ShowMessage(" Error ", err.Error(), Graphite.BtnDanger)
+				app.ShowMessage(app.T(locales.KeyErrorTitle), err.Error(), Graphite.BtnDanger)
 				return
 			}
 			refresh()
 		}))
-		mod.AddWidget(Graphite.NewButton(x+21, -4, "Close", Graphite.BtnDanger, func() {
+		mod.AddWidget(Graphite.NewButton(x+21, -4, app.T(locales.KeyManageTabsCloseTab), Graphite.BtnDanger, func() {
 			p.CloseTabAt(list.Selected)
 			refresh()
 		}))
@@ -2131,7 +2283,7 @@ func showManageTabs(app *Graphite.Application, left, right *paneTabs) {
 	addRow(2, left, leftList)
 	addRow(38, right, rightList)
 
-	mod.AddWidget(Graphite.NewButton(2, -2, "Done", Graphite.BtnDefault, func() {
+	mod.AddWidget(Graphite.NewButton(2, -2, app.T(locales.KeyManageTabsDone), Graphite.BtnDefault, func() {
 		app.CloseModal()
 	}))
 
@@ -2226,6 +2378,7 @@ func saveTabs(left, right *paneTabs) {
 		LeftActive:  left.group.Active,
 		Right:       pinnedOf(right),
 		RightActive: right.group.Active,
+		Locale:      string(left.app.Locale()),
 	}
 	tabs.Save(state) // best-effort: a failed save here shouldn't block quitting
 }
