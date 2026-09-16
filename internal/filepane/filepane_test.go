@@ -749,6 +749,34 @@ func TestFilePane_ScrollbarAbsentWhenEverythingFits(t *testing.T) {
 	}
 }
 
+// TestFilePane_AttrColumnLeavesRoomForTheScrollbar is a regression test:
+// layout() used to size columns against the pane's full LastW, so a wide
+// enough pane put the Attr column's own last character in the exact
+// column drawScrollbar always claims for its thumb/track — invisible
+// until a directory actually had enough entries to need scrolling, which
+// is why it went unnoticed. Reproduces both conditions at once: a pane
+// wide enough to show every column, and enough rows to force a scrollbar.
+func TestFilePane_AttrColumnLeavesRoomForTheScrollbar(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 30; i++ {
+		mustWriteFile(t, filepath.Join(dir, fmt.Sprintf("f%02d.txt", i)), "x")
+	}
+	fp := New(0, 0, 70, 12, vfs.LocalFS{}, dir)
+	fp.LastW, fp.LastH = 70, 12
+
+	if fp.scrollbarMaxScroll() == 0 {
+		t.Fatal("test setup: expected this pane to need scrolling")
+	}
+
+	l := fp.layout()
+	if l.attrX < 0 {
+		t.Fatal("test setup: expected the Attr column to be shown at this width")
+	}
+	if lastAttrCol := l.attrX + attrColWidth - 1; lastAttrCol >= fp.LastW-1 {
+		t.Errorf("Attr column's last character is at column %d, which is fp.LastW-1 (%d) — the same column drawScrollbar always claims for its thumb/track, so it will be painted over the moment this directory needs scrolling", lastAttrCol, fp.LastW-1)
+	}
+}
+
 func TestFilePane_HeaderTintReflectsFocus(t *testing.T) {
 	fp, _ := newTestPane(t)
 	canvas := Graphite.NewCanvas()

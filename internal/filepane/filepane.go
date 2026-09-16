@@ -758,7 +758,17 @@ type colLayout struct {
 // narrows — the same graceful degradation a classic commander applies
 // rather than truncating every filename to nothing.
 func (fp *FilePane) layout() colLayout {
-	w := fp.LastW
+	// w reserves FilePane's own rightmost column for drawScrollbar's
+	// thumb/track — drawn unconditionally whenever the listing needs
+	// scrolling (len(fp.rows) > visible), always in that exact column,
+	// with no way for layout (called well before any row is drawn) to
+	// know in advance whether that'll be true this frame. Without this,
+	// a wide-enough attrColWidth put Attr's own last character in that
+	// same column, and the scrollbar (drawn after every row) painted
+	// over it — invisible until a directory had enough entries to
+	// actually need scrolling, which is exactly the bug this reservation
+	// avoids rather than only patching around.
+	w := fp.LastW - 1
 
 	if rem := w - (1 + extColWidth + 1 + sizeColWidth + 1 + dateColWidth + 1 + attrColWidth); rem >= minNameWidth {
 		extX := rem + 1
