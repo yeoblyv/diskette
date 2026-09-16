@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/jlaffaye/ftp v0.2.4
 	github.com/pkg/sftp v1.13.11
-	github.com/yeoblyv/graphite v0.2.3
+	github.com/yeoblyv/graphite v0.2.4
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
 )
