@@ -165,6 +165,7 @@ var Dutch = Graphite.Catalog{
 	KeyDeleteMessage: "%d item(s) verwijderen?",
 
 	KeyErrRemoteEditUnsupported: "Een extern bestand openen wordt nog niet ondersteund.",
+	KeyErrDestinationInsideSrc:  "Kan niet worden voltooid: de bestemming is dezelfde map, of bevindt zich binnen de map die wordt gekopieerd of verplaatst.",
 
 	KeyConnectTitle:      " Verbinden met server ",
 	KeyConnectProtocol:   "Protocol:",

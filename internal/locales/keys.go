@@ -239,6 +239,7 @@ const (
 	// --- Misc errors ---
 
 	KeyErrRemoteEditUnsupported = "diskette.error.remote_open_unsupported"
+	KeyErrDestinationInsideSrc  = "diskette.error.dest_inside_source"
 
 	// --- Connect dialog ---
 

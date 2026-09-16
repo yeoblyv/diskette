@@ -174,6 +174,7 @@ var English = Graphite.Catalog{
 	KeyDeleteMessage: "Delete %d item(s)?",
 
 	KeyErrRemoteEditUnsupported: "Opening a remote file isn't supported yet.",
+	KeyErrDestinationInsideSrc:  "Can't complete: the destination is the same folder, or is inside the folder being copied or moved.",
 
 	KeyConnectTitle:      " Connect to server ",
 	KeyConnectProtocol:   "Protocol:",

@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -2056,7 +2057,11 @@ func doCopyOrMove(app *Graphite.Application, src, dst *filepane.FilePane, move b
 			src.Reload()
 			dst.Reload()
 			if runErr != nil && runErr != copyengine.ErrCanceledByUser && ctx.Err() == nil {
-				app.ShowMessage(app.T(locales.KeyErrorTitle), runErr.Error(), Graphite.BtnDanger)
+				msg := runErr.Error()
+				if errors.Is(runErr, copyengine.ErrDestinationInsideSource) {
+					msg = app.T(locales.KeyErrDestinationInsideSrc)
+				}
+				app.ShowMessage(app.T(locales.KeyErrorTitle), msg, Graphite.BtnDanger)
 			}
 		})
 	}()

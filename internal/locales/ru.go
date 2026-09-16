@@ -165,6 +165,7 @@ var Russian = Graphite.Catalog{
 	KeyDeleteMessage: "Удалить %d объект(ов)?",
 
 	KeyErrRemoteEditUnsupported: "Открытие удалённого файла пока не поддерживается.",
+	KeyErrDestinationInsideSrc:  "Невозможно выполнить: место назначения — та же папка или папка внутри копируемой либо перемещаемой.",
 
 	KeyConnectTitle:      " Подключение к серверу ",
 	KeyConnectProtocol:   "Протокол:",

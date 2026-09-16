@@ -153,6 +153,22 @@ func pathSeparator(fs vfs.FileSystem) byte {
 	return '/'
 }
 
+// ErrDestinationInsideSource is returned by Run without doing anything —
+// no plan, no copy, no delete — when task.DstDir is one of task.SrcPaths
+// itself, or is nested inside one of them (only possible when SrcFS and
+// DstFS are the same filesystem). Letting this through was catastrophic
+// for Move specifically: the copy phase would successfully place a fresh
+// copy inside the very tree being moved, and then removeMovedSources'
+// end-of-run cleanup — which deletes the *entire* source root once every
+// entry beneath it copied cleanly, with no awareness that the destination
+// was ever inside it — would delete that root, taking the just-created
+// copy down with it and leaving nothing at all, having reported success.
+// Copy alone can't destroy data this way, but "copy a folder into its own
+// subfolder" is exactly as nonsensical for a caller as it is for Move, so
+// both are refused up front the same way any mainstream file manager
+// refuses it, rather than one of them being allowed to quietly eat itself.
+var ErrDestinationInsideSource = errors.New("copyengine: destination is the source itself, or is inside it")
+
 // Run performs task, calling onProgress as it works and onConflict for
 // each destination path that already exists, until every planned entry is
 // processed, ctx is canceled, or a conflict is answered Cancel. It returns
@@ -160,12 +176,20 @@ func pathSeparator(fs vfs.FileSystem) byte {
 // the run early, or nil for a run that reached the end (per-item errors
 // recorded via Progress.Err are not fatal and do not appear here).
 func Run(ctx context.Context, task Task, onProgress ProgressFunc, onConflict ResolveFunc) (int, error) {
+	sep := pathSeparator(task.DstFS)
+	if task.SrcFS == task.DstFS {
+		for _, srcPath := range task.SrcPaths {
+			if task.DstDir == srcPath || (strings.HasPrefix(task.DstDir, srcPath) && len(task.DstDir) > len(srcPath) && task.DstDir[len(srcPath)] == sep) {
+				return 0, ErrDestinationInsideSource
+			}
+		}
+	}
+
 	jobs, err := plan(ctx, task)
 	if err != nil {
 		return 0, err
 	}
 	total := len(jobs)
-	sep := pathSeparator(task.DstFS)
 
 	var (
 		done       int
@@ -218,6 +242,35 @@ func Run(ctx context.Context, task Task, onProgress ProgressFunc, onConflict Res
 
 		dstPath := applyRenames(j.dstPath)
 		if isSkipped(dstPath) {
+			continue
+		}
+
+		// A file whose destination is the exact same path on the exact
+		// same filesystem — the common way to reach this is both panes
+		// pointed at the same directory — must never reach copyFile.
+		// copyFile opens the destination for writing (which truncates)
+		// while a *different* handle may still be reading the identical
+		// underlying file, destroying its content before a single byte
+		// is actually copied; Move would then delete what's left,
+		// losing it entirely. task.DstFS.Stat below would always find
+		// this "conflict" (the path IS the source), so without this
+		// check every such file would silently hit a normal-looking
+		// "already exists — overwrite?" prompt whose only safe answer
+		// is one the user has no way to know they need to pick. Treat
+		// it as already exactly where it needs to be instead: count it
+		// as done (the destination already holds the right file) and
+		// move on, never touching it — not even to remove it for Move.
+		// rootSkipped also has to be set here, not just skipped for this
+		// one job: Move's own end-of-run removeMovedSources call deletes
+		// each *root* that wasn't marked skipped regardless of what
+		// happened to its individual files, so without this a
+		// self-collision on every file in a root (the normal case when
+		// the whole root maps onto itself) would still end with the root
+		// deleted out from under the files this very check just protected.
+		if !j.entry.IsDir && j.srcPath == dstPath && task.SrcFS == task.DstFS {
+			rootSkipped[j.rootIdx] = true
+			done++
+			emit(dstPath, nil, i == len(jobs)-1)
 			continue
 		}
 
