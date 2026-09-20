@@ -1,0 +1,17 @@
+Package: diskette
+Version: 0.2.0
+Architecture: arm64
+Maintainer: Yehor Oblyvantsov <xineraman8@gmail.com>
+Filename: pool/diskette_0.2.0_arm64.deb
+Size: 4687312
+MD5sum: 926b0e430547a2f5869aa320ea62f32f
+SHA1: a442a093ec6f7b5d1584a6d622fdbe7b54a82872
+SHA256: 079212735b0e8af967f5558c41ab43fc5fa0b347aefb166f3e830514201b0bd0
+Section: utils
+Priority: optional
+Homepage: https://github.com/yeoblyv/diskette
+Description: Cross-platform dual-pane terminal file manager
+ A dual-pane terminal file manager in the style of classic Total
+ Commander/Midnight Commander, with tabs, remote SFTP/FTP panes,
+ archiving, and file search/grep, built on the graphite TUI framework.
+
