@@ -105,3 +105,31 @@ sudo apt update && sudo apt install diskette
 
 `[trusted=yes]` is required because the repo isn't GPG-signed yet — see
 the `README.md` `build_apt_repo.sh` writes alongside it.
+
+## SourceForge
+
+A mirror on SourceForge needs a project there, which only the project
+owner can create (account creation isn't something this automation does
+on its own). Once the project exists, mirroring each release is:
+
+1. Create the project at [sourceforge.net/p/add](https://sourceforge.net/p/add)
+   (suggested name: `diskette-fm`, since plain `diskette` is likely taken)
+   and add an SSH key under Account → SSH Keys — SourceForge's file
+   release system (`frs.sourceforge.net`) is SFTP/rsync-only, no web
+   upload for more than a couple of files at a time.
+2. For each release, upload the same assets already attached to the
+   [GitHub release](https://github.com/yeoblyv/diskette/releases) —
+   `dist/*` after running the build scripts above — into a matching
+   version folder:
+   ```bash
+   rsync -avP dist/diskette-v0.2.0-* dist/Diskette-v0.2.0-* dist/SHA256SUMS.txt \
+     <your-sf-username>@frs.sourceforge.net:/home/frs/project/diskette-fm/v0.2.0/
+   ```
+3. Mark the right file "default download" per OS in the project's Files
+   page (SourceForge auto-detects the visitor's OS and offers that one),
+   and add the project's SourceForge badge/link back to `README.md`.
+
+This isn't automated here since it depends on the SourceForge project
+existing first; once it does, the `rsync` step above is the only
+recurring part and could move into a script the same way the APT repo's
+publish step did.
