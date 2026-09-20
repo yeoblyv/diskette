@@ -1508,7 +1508,7 @@ func showAbout(app *Graphite.Application) {
 	}
 
 	info := Graphite.NewLabel(40, 2,
-		app.T(locales.KeyAboutVersion, "0.1.0")+"\n\n"+
+		app.T(locales.KeyAboutVersion, "0.2.0")+"\n\n"+
 			app.T(locales.KeyAboutTagline1)+"\n"+
 			app.T(locales.KeyAboutTagline2)+"\n"+
 			app.T(locales.KeyAboutTagline3)+"\n"+

@@ -4,7 +4,7 @@ A cross-platform dual-pane terminal file manager, in the style of classic
 Total Commander/Midnight Commander, built on the
 [graphite](https://github.com/yeoblyv/graphite) TUI framework.
 
-> Beta release (v0.1.0). Expect rough edges.
+> Beta release (v0.2.0). Expect rough edges.
 
 ## Features
 
