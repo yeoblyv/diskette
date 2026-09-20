@@ -40,9 +40,6 @@ release's checksums, and installs it to `~/.local/bin` (override with
 Prebuilt binaries for macOS, Linux, and Windows (amd64/arm64/386) are also
 attached to each [release](https://github.com/yeoblyv/diskette/releases)
 directly — a macOS `.app`/`.dmg`, plain executables for Linux and Windows.
-See [packaging/README.md](packaging/README.md) for platform-specific
-install steps (including Linux's `install.sh` for desktop-launcher
-integration) and how those artifacts are built.
 
 ## Build from source
 

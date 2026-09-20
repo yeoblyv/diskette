@@ -39,7 +39,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Maintainer: Yehor Oblyvantsov <xineraman8@gmail.com>
+Maintainer: Yehor Oblyvantsov
 Homepage: https://github.com/yeoblyv/diskette
 Description: Cross-platform dual-pane terminal file manager
  A dual-pane terminal file manager in the style of classic Total

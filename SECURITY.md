@@ -13,7 +13,7 @@ Only the latest released version receives security fixes.
 
 Report privately — never in a public issue, discussion, or pull request:
 
-- Email: **xineraman8@gmail.com**
+- [Open a private GitHub Security Advisory](https://github.com/yeoblyv/diskette/security/advisories/new) for this repository.
 
 Include what you found, the affected version, and reproduction steps if possible. Expect an initial response within 5 business days.
 
