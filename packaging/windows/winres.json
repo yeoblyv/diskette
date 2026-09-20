@@ -16,7 +16,7 @@
       "0409": {
         "identity": {
           "name": "com.yeoblyv.diskette",
-          "version": "0.1.0.0"
+          "version": "0.2.0.0"
         },
         "description": "Diskette",
         "minimum-os": "win7",

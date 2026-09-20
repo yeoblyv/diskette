@@ -1,6 +1,6 @@
 module github.com/yeoblyv/diskette
 
-go 1.26.0
+go 1.26.6
 
 require (
 	github.com/jlaffaye/ftp v0.2.4

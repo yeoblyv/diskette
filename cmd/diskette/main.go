@@ -1491,10 +1491,8 @@ func closeRemoteTabs(p *paneTabs) {
 
 // showAbout opens a custom modal: the logo (internal/assets.DisketteLogo,
 // embedded into the binary at compile time, decoded once here) on the
-// left, program information on the right. No version number is shown —
-// AGENTS_UNIVERSAL reserves the version-bump decision for the project
-// owner, and none has been authorized yet; a "development build" label is
-// truthful without inventing one.
+// left, program information on the right, including the build's version
+// (see version.go).
 func showAbout(app *Graphite.Application) {
 	// Height 27: the logo is 18 rows starting at content row 2 (through
 	// row 19), so the content area needs to be at least that tall plus
@@ -1508,7 +1506,7 @@ func showAbout(app *Graphite.Application) {
 	}
 
 	info := Graphite.NewLabel(40, 2,
-		app.T(locales.KeyAboutVersion, "0.2.0")+"\n\n"+
+		app.T(locales.KeyAboutVersion, version)+"\n\n"+
 			app.T(locales.KeyAboutTagline1)+"\n"+
 			app.T(locales.KeyAboutTagline2)+"\n"+
 			app.T(locales.KeyAboutTagline3)+"\n"+

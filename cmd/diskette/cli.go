@@ -56,6 +56,8 @@ func runCLI(args []string) (exitCode int, handled bool) {
 		return cliTagging(false, args[1:]), true
 	case "select":
 		return cliSelect(args[1:]), true
+	case "--version", "-v", "version":
+		return cliVersion(), true
 	default:
 		if insideDiskettePane() {
 			return cliHelp(), true
@@ -69,6 +71,15 @@ func runCLI(args []string) (exitCode int, handled bool) {
 func insideDiskettePane() bool {
 	_, _, err := diskettePane()
 	return err == nil
+}
+
+// cliVersion prints the build's version (see version.go) and exits,
+// honoring the `--version`/`-v` convention from any shell — unlike
+// cliHelp and the rest of this file, it's available whether or not this
+// process happens to be running inside diskette's own Terminal tab.
+func cliVersion() int {
+	fmt.Println("diskette " + version)
+	return 0
 }
 
 // cliHelp lists the commands available from inside a diskette terminal
