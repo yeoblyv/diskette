@@ -26,11 +26,23 @@ Total Commander/Midnight Commander, built on the
 
 ## Install
 
-Prebuilt binaries for macOS, Linux, and Windows (amd64/arm64/386) are
-attached to each [release](https://github.com/yeoblyv/diskette/releases) —
-a macOS `.app`/`.dmg`, plain executables for Linux and Windows. See
-[packaging/README.md](packaging/README.md) for platform-specific install
-steps (including Linux's `install.sh`) and how those artifacts are built.
+On Linux or macOS, install the latest release with one line — handy for a
+headless server, no git clone or Go toolchain needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yeoblyv/diskette/main/install.sh | sh
+```
+
+It downloads the right binary for your OS/arch, verifies it against the
+release's checksums, and installs it to `~/.local/bin` (override with
+`DISKETTE_INSTALL_DIR`).
+
+Prebuilt binaries for macOS, Linux, and Windows (amd64/arm64/386) are also
+attached to each [release](https://github.com/yeoblyv/diskette/releases)
+directly — a macOS `.app`/`.dmg`, plain executables for Linux and Windows.
+See [packaging/README.md](packaging/README.md) for platform-specific
+install steps (including Linux's `install.sh` for desktop-launcher
+integration) and how those artifacts are built.
 
 ## Build from source
 

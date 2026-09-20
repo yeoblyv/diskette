@@ -76,3 +76,32 @@ desktop environment's launcher (GNOME Activities, KDE, etc.) picks up
 from automatically. The desktop entry's `Terminal=true` is Linux's
 equivalent of macOS's launcher wrapper: it tells the launcher to run the
 command inside a terminal emulator instead of headlessly.
+
+For a headless server rather than a desktop, the repo root's
+[`install.sh`](../install.sh) is simpler: it downloads the latest
+release's binary for the current OS/arch straight from GitHub and drops
+it on `PATH`, no packaging or desktop integration involved.
+
+### .deb package and APT repo
+
+`packaging/linux/build_deb.sh [amd64|arm64] [version] [path-to-binary]`
+assembles `dist/diskette_<version>_<arch>.deb` (binary, icon, `.desktop`
+entry, `/usr/share/doc/diskette/copyright`) from an already
+cross-compiled binary — needs `dpkg-deb` (preinstalled on any Debian/
+Ubuntu box; `brew install dpkg` on macOS).
+
+`packaging/linux/build_apt_repo.sh` then assembles a flat APT repository
+under `dist/apt-repo` from every `.deb` in `dist/` — needs
+`dpkg-scanpackages` (same `dpkg` package). `packaging/linux/publish_apt_repo.sh`
+pushes that directory to the orphan `gh-pages` branch under `/apt`, which
+GitHub Pages serves — `dist/` itself is never committed to `main` (build
+output, see `.gitignore`), so the repo's actual `.deb` history lives only
+on `gh-pages`, not in `main`'s. The result is installable as:
+
+```bash
+echo "deb [trusted=yes] https://yeoblyv.github.io/diskette/apt stable main" | sudo tee /etc/apt/sources.list.d/diskette.list
+sudo apt update && sudo apt install diskette
+```
+
+`[trusted=yes]` is required because the repo isn't GPG-signed yet — see
+the `README.md` `build_apt_repo.sh` writes alongside it.
