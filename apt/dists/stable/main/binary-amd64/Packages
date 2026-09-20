@@ -1,12 +1,12 @@
 Package: diskette
 Version: 0.2.1
 Architecture: amd64
-Maintainer: Yehor Oblyvantsov <xineraman8@gmail.com>
+Maintainer: Yehor Oblyvantsov
 Filename: pool/diskette_0.2.1_amd64.deb
-Size: 5252764
-MD5sum: d9476cb2ff62f917175dfb328c8d9692
-SHA1: 804e2dc867c5de8129b1af0b497b29ee8af4c61d
-SHA256: f410d464c5aa006303763ef3ed00b8557acd56594e48457a3d4a9c11bab7ced8
+Size: 5253648
+MD5sum: 50fa2ba409c2f96bbd3f49657c14cca7
+SHA1: 0d2c82b8586220bc26726475795e9416b4d12acc
+SHA256: 0b49c78f55e518252123450ea29f1048b56305f9d1cf561cf8864baa02d44dd1
 Section: utils
 Priority: optional
 Homepage: https://github.com/yeoblyv/diskette
