@@ -106,6 +106,47 @@ func TestRunCLI_RecognizedCommandsStillDispatchInsideDisketteTerminal(t *testing
 	}
 }
 
+func TestRunCLI_VersionFlagWorksOutsideDisketteTerminal(t *testing.T) {
+	t.Setenv("DISKETTE_IPC", "")
+	t.Setenv("DISKETTE_TERMINAL_ID", "")
+
+	orig := version
+	version = "1.2.3"
+	defer func() { version = orig }()
+
+	for _, arg := range []string{"--version", "-v", "version"} {
+		var code int
+		var handled bool
+		out := withCapturedStdout(t, func() { code, handled = runCLI([]string{arg}) })
+
+		if !handled {
+			t.Errorf("runCLI([%q]) reported handled=false, want true — --version must work even outside a diskette terminal, unlike view/sync/tag/...", arg)
+		}
+		if code != 0 {
+			t.Errorf("runCLI([%q]) exit code = %d, want 0", arg, code)
+		}
+		if strings.TrimSpace(out) != "diskette 1.2.3" {
+			t.Errorf("runCLI([%q]) output = %q, want %q", arg, out, "diskette 1.2.3\n")
+		}
+	}
+}
+
+func TestCliVersion_PrintsBinaryNameAndVersion(t *testing.T) {
+	orig := version
+	version = "0.2.0"
+	defer func() { version = orig }()
+
+	var code int
+	out := withCapturedStdout(t, func() { code = cliVersion() })
+
+	if code != 0 {
+		t.Errorf("cliVersion() exit code = %d, want 0", code)
+	}
+	if strings.TrimSpace(out) != "diskette 0.2.0" {
+		t.Errorf("cliVersion() output = %q, want %q", out, "diskette 0.2.0\n")
+	}
+}
+
 // withCapturedStdoutStderr is withCapturedStdout plus stderr, since
 // cliSelect's usage message goes to stderr rather than stdout.
 func withCapturedStdoutStderr(t *testing.T, fn func()) string {
