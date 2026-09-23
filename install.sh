@@ -31,8 +31,16 @@ case "$(uname -m)" in
 		;;
 esac
 
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
 echo "install.sh: resolving the latest release..."
-tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+# Written to a file rather than piped straight into grep -m1: grep exits
+# (and closes its end of the pipe) right after its first match, and curl
+# writing further response bytes into that closed pipe logs a harmless
+# but alarming "curl: (23) Failure writing output to destination".
+curl -fsSL -o "$tmp/release.json" "https://api.github.com/repos/$REPO/releases/latest"
+tag=$(grep -m1 '"tag_name"' "$tmp/release.json" | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
 if [ -z "$tag" ]; then
 	echo "install.sh: could not resolve the latest release tag from the GitHub API" >&2
 	exit 1
@@ -41,9 +49,6 @@ version="${tag#v}"
 
 asset="diskette-${tag}-${os}-${arch}"
 base_url="https://github.com/$REPO/releases/download/$tag"
-
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
 
 echo "install.sh: downloading $asset ($tag)..."
 curl -fsSL -o "$tmp/$asset" "$base_url/$asset"
